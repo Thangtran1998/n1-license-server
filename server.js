@@ -89,6 +89,11 @@ app.post("/api/verify", (req, res) => {
   const db = loadDB();
   const rec = db[license];
 
+  //Chặn nếu thiết bị đã bị admin thu hồi
+  if (db.__revokedDevices && db.__revokedDevices[deviceId]) {
+    return res.status(403).send("Device revoked");
+  }
+
   if (!rec) {
   // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
   db[license] = {
@@ -115,6 +120,7 @@ app.post("/api/verify", (req, res) => {
 });
 
 });
+
 
 app.post("/api/request-reset", (req, res) => {
   const { deviceId, oldLicense, note } = req.body || {};
@@ -150,6 +156,25 @@ app.post("/api/admin/generate", (req, res) => {
   // trả về license + userName cho tiện
   res.json({ license, expiry, userName });
 });
+
+
+// Admin revoke device (PHẢI khóa)
+app.post("/api/admin/revoke-device", (req, res) => {
+  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
+  const key = req.header("x-admin-key");
+  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
+
+  const { deviceId, reason } = req.body || {};
+  if (!deviceId) return res.status(400).send("Missing deviceId");
+
+  const db = loadDB();
+  db.__revokedDevices = db.__revokedDevices || {};
+  db.__revokedDevices[deviceId] = { reason: reason || "", at: new Date().toISOString() };
+  saveDB(db);
+
+  res.json({ ok: true });
+});
+
 
 
 const PORT = process.env.PORT || 3000;
