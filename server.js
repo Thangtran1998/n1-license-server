@@ -175,6 +175,25 @@ app.post("/api/admin/revoke-device", (req, res) => {
   res.json({ ok: true });
 });
 
+// Admin UN-revoke device (cấp lại quyền)
+app.post("/api/admin/unrevoke-device", (req, res) => {
+  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
+  const key = req.header("x-admin-key");
+  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
+
+  const { deviceId } = req.body || {};
+  if (!deviceId) return res.status(400).send("Missing deviceId");
+
+  const db = loadDB();
+  if (db.__revokedDevices && db.__revokedDevices[deviceId]) {
+    delete db.__revokedDevices[deviceId];
+    saveDB(db);
+  }
+
+  res.json({ ok: true });
+});
+
+
 
 
 const PORT = process.env.PORT || 3000;
