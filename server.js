@@ -90,16 +90,30 @@ app.post("/api/verify", (req, res) => {
   const rec = db[license];
 
   if (!rec) {
-    db[license] = { deviceId, expiry: p.expiry, firstUsedAt: new Date().toISOString() };
-    saveDB(db);
-    return res.json({ ok: true, expiry: p.expiry, bound: true, firstBind: true });
-  }
+  // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
+  db[license] = {
+    deviceId,
+    expiry: p.expiry,
+    userName: "User",
+    firstUsedAt: new Date().toISOString()
+  };
+  saveDB(db);
+  return res.json({ ok:true, expiry:p.expiry, userName: db[license].userName, bound:true, firstBind:true });
+}
+
 
   if (rec.deviceId !== deviceId) {
     return res.status(403).send("License already bound to another device");
   }
 
-  return res.json({ ok: true, expiry: p.expiry, bound: true, firstBind: false });
+  return res.json({
+  ok: true,
+  expiry: p.expiry,
+  userName: rec.userName || "User",
+  bound: true,
+  firstBind: false
+});
+
 });
 
 app.post("/api/request-reset", (req, res) => {
@@ -114,12 +128,29 @@ app.post("/api/admin/generate", (req, res) => {
   const key = req.header("x-admin-key");
   if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
 
-  const { deviceId, expiry } = req.body || {};
-  if (!deviceId || !expiry) return res.status(400).send("Missing deviceId/expiry");
+  // ✅ NEW: nhận thêm userName
+  const { deviceId, expiry, userName } = req.body || {};
+  if (!deviceId || !expiry || !userName) {
+    return res.status(400).send("Missing deviceId/expiry/userName");
+  }
 
   const hash = computeLicenseHash(deviceId, expiry);
-  res.json({ license: `${expiry}-${hash}` });
+  const license = `${expiry}-${hash}`;
+
+  // ✅ NEW: lưu vào DB để sau này verify trả về userName
+  const db = loadDB();
+  db[license] = {
+    deviceId,
+    expiry,
+    userName,
+    createdAt: new Date().toISOString()
+  };
+  saveDB(db);
+
+  // trả về license + userName cho tiện
+  res.json({ license, expiry, userName });
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("License server running :" + PORT));

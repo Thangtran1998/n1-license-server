@@ -1,0 +1,12 @@
+
+Bước 1 : Khởi chạy server
+	truy cập link : https://dashboard.render.com/web/srv-d63cbjfpm1nc738494q0
+Bước 2 : Lấy tên thiết bị từ user dán vào đoạn code dưới
+
+Chạy đoạn code trên ppsell
+
+$url = "https://n1-license-server.onrender.com/api/admin/generate"
+$headers = @{ "x-admin-key" = "admin_7f2aK9Q8PL3XbYt9u6m" }
+$body = @{ deviceId = "8ecb79e4-c056-4ac1-a5c1-82f3b3043ad9"; expiry = "20260701" } | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri $url -Headers $headers -ContentType "application/json" -Body $body
