@@ -97,13 +97,21 @@ app.post("/api/verify", (req, res) => {
   if (!rec) {
   // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
   db[license] = {
-    deviceId,
-    expiry: p.expiry,
-    userName: "User",
-    firstUsedAt: new Date().toISOString()
-  };
-  saveDB(db);
-  return res.json({ ok:true, expiry:p.expiry, userName: db[license].userName, bound:true, firstBind:true });
+  deviceId,
+  expiry: p.expiry,
+  userName: "User",
+  examDate: "", // ✅ NEW
+  firstUsedAt: new Date().toISOString()
+};
+saveDB(db);
+return res.json({
+  ok: true,
+  expiry: p.expiry,
+  userName: db[license].userName,
+  examDate: db[license].examDate || "", // ✅ NEW
+  bound: true,
+  firstBind: true
+});
 }
 
 
@@ -115,9 +123,11 @@ app.post("/api/verify", (req, res) => {
   ok: true,
   expiry: p.expiry,
   userName: rec.userName || "User",
+  examDate: rec.examDate || "",   // ✅ NEW
   bound: true,
   firstBind: false
 });
+
 
 });
 
@@ -134,27 +144,29 @@ app.post("/api/admin/generate", (req, res) => {
   const key = req.header("x-admin-key");
   if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
 
-  // ✅ NEW: nhận thêm userName
-  const { deviceId, expiry, userName } = req.body || {};
-  if (!deviceId || !expiry || !userName) {
-    return res.status(400).send("Missing deviceId/expiry/userName");
-  }
+// ✅ NEW: nhận thêm userName + examDate (examDate dạng YYYYMMDD, ví dụ 20260707)
+const { deviceId, expiry, userName, examDate } = req.body || {};
+if (!deviceId || !expiry || !userName) {
+  return res.status(400).send("Missing deviceId/expiry/userName");
+}
 
-  const hash = computeLicenseHash(deviceId, expiry);
-  const license = `${expiry}-${hash}`;
+const hash = computeLicenseHash(deviceId, expiry);
+const license = `${expiry}-${hash}`;
 
-  // ✅ NEW: lưu vào DB để sau này verify trả về userName
-  const db = loadDB();
-  db[license] = {
-    deviceId,
-    expiry,
-    userName,
-    createdAt: new Date().toISOString()
-  };
-  saveDB(db);
+// ✅ lưu vào DB để sau này verify trả về userName + examDate
+const db = loadDB();
+db[license] = {
+  deviceId,
+  expiry,
+  userName,
+  examDate: examDate || "",     // ✅ NEW
+  createdAt: new Date().toISOString()
+};
+saveDB(db);
 
-  // trả về license + userName cho tiện
-  res.json({ license, expiry, userName });
+// trả về license + userName + examDate
+res.json({ license, expiry, userName, examDate: examDate || "" });
+
 });
 
 
