@@ -15,7 +15,8 @@ if (!SECRET) {
   throw new Error("Missing env LICENSE_SECRET");
 }
 
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "https://thangtran1998.github.io";
+const ALLOW_ORIGIN =
+  process.env.ALLOW_ORIGIN || "https://thangtran1998.github.io";
 const ADMIN_KEY = process.env.ADMIN_KEY; // bắt buộc set trên production
 
 // DB file (tối thiểu). Về lâu dài nên chuyển sang DB thật.
@@ -72,7 +73,8 @@ app.get("/api/ping", (req, res) => {
 
 app.post("/api/verify", (req, res) => {
   const { deviceId, license } = req.body || {};
-  if (!deviceId || !license) return res.status(400).send("Missing deviceId/license");
+  if (!deviceId || !license)
+    return res.status(400).send("Missing deviceId/license");
 
   const p = parseLicense(license);
   if (!p) return res.status(400).send("Bad license format");
@@ -95,46 +97,47 @@ app.post("/api/verify", (req, res) => {
   }
 
   if (!rec) {
-  // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
-  db[license] = {
-  deviceId,
-  expiry: p.expiry,
-  userName: "User",
-  examDate: "", // ✅ NEW
-  firstUsedAt: new Date().toISOString()
-};
-saveDB(db);
-return res.json({
-  ok: true,
-  expiry: p.expiry,
-  userName: db[license].userName,
-  examDate: db[license].examDate || "", // ✅ NEW
-  bound: true,
-  firstBind: true
-});
-}
-
+    // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
+    db[license] = {
+      deviceId,
+      expiry: p.expiry,
+      userName: "User",
+      examDate: "", // ✅ NEW
+      firstUsedAt: new Date().toISOString(),
+    };
+    saveDB(db);
+    return res.json({
+      ok: true,
+      expiry: p.expiry,
+      userName: db[license].userName,
+      examDate: db[license].examDate || "", // ✅ NEW
+      bound: true,
+      firstBind: true,
+    });
+  }
 
   if (rec.deviceId !== deviceId) {
     return res.status(403).send("License already bound to another device");
   }
 
   return res.json({
-  ok: true,
-  expiry: p.expiry,
-  userName: rec.userName || "User",
-  examDate: rec.examDate || "",   // ✅ NEW
-  bound: true,
-  firstBind: false
+    ok: true,
+    expiry: p.expiry,
+    userName: rec.userName || "User",
+    examDate: rec.examDate || "", // ✅ NEW
+    bound: true,
+    firstBind: false,
+  });
 });
-
-
-});
-
 
 app.post("/api/request-reset", (req, res) => {
   const { deviceId, oldLicense, note } = req.body || {};
-  console.log("[RESET REQUEST]", { deviceId, oldLicense, note, at: new Date().toISOString() });
+  console.log("[RESET REQUEST]", {
+    deviceId,
+    oldLicense,
+    note,
+    at: new Date().toISOString(),
+  });
   res.json({ ok: true });
 });
 
@@ -144,31 +147,29 @@ app.post("/api/admin/generate", (req, res) => {
   const key = req.header("x-admin-key");
   if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
 
-// ✅ NEW: nhận thêm userName + examDate (examDate dạng YYYYMMDD, ví dụ 20260707)
-const { deviceId, expiry, userName, examDate } = req.body || {};
-if (!deviceId || !expiry || !userName) {
-  return res.status(400).send("Missing deviceId/expiry/userName");
-}
+  // ✅ NEW: nhận thêm userName + examDate (examDate dạng YYYYMMDD, ví dụ 20260707)
+  const { deviceId, expiry, userName, examDate } = req.body || {};
+  if (!deviceId || !expiry || !userName) {
+    return res.status(400).send("Missing deviceId/expiry/userName");
+  }
 
-const hash = computeLicenseHash(deviceId, expiry);
-const license = `${expiry}-${hash}`;
+  const hash = computeLicenseHash(deviceId, expiry);
+  const license = `${expiry}-${hash}`;
 
-// ✅ lưu vào DB để sau này verify trả về userName + examDate
-const db = loadDB();
-db[license] = {
-  deviceId,
-  expiry,
-  userName,
-  examDate: examDate || "",     // ✅ NEW
-  createdAt: new Date().toISOString()
-};
-saveDB(db);
+  // ✅ lưu vào DB để sau này verify trả về userName + examDate
+  const db = loadDB();
+  db[license] = {
+    deviceId,
+    expiry,
+    userName,
+    examDate: examDate || "", // ✅ NEW
+    createdAt: new Date().toISOString(),
+  };
+  saveDB(db);
 
-// trả về license + userName + examDate
-res.json({ license, expiry, userName, examDate: examDate || "" });
-
+  // trả về license + userName + examDate
+  res.json({ license, expiry, userName, examDate: examDate || "" });
 });
-
 
 // Admin revoke device (PHẢI khóa)
 app.post("/api/admin/revoke-device", (req, res) => {
@@ -181,7 +182,10 @@ app.post("/api/admin/revoke-device", (req, res) => {
 
   const db = loadDB();
   db.__revokedDevices = db.__revokedDevices || {};
-  db.__revokedDevices[deviceId] = { reason: reason || "", at: new Date().toISOString() };
+  db.__revokedDevices[deviceId] = {
+    reason: reason || "",
+    at: new Date().toISOString(),
+  };
   saveDB(db);
 
   res.json({ ok: true });
@@ -204,9 +208,6 @@ app.post("/api/admin/unrevoke-device", (req, res) => {
 
   res.json({ ok: true });
 });
-
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("License server running :" + PORT));
