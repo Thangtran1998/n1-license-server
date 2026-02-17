@@ -10,7 +10,6 @@ const app = express();
  * - ALLOW_ORIGIN: domain được phép gọi API (GitHub Pages của anh)
  * - ADMIN_KEY: khóa endpoint generate
  */
-
 const SECRET = process.env.LICENSE_SECRET;
 if (!SECRET) {
   throw new Error("Missing env LICENSE_SECRET");
@@ -36,32 +35,13 @@ app.use(express.json());
 
 /** ===== DB ===== */
 function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    return { users: {}, licenses: {}, __revokedDevices: {},test_results: {} };
-  }
+  if (!fs.existsSync(DB_FILE)) return {};
   try {
-    const raw = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-
-    // migrate nhẹ: nếu file cũ là object license->rec thì chuyển sang raw.licenses
-    if (!raw.users && !raw.licenses) {
-      return {
-        users: {},
-        licenses: raw || {},
-        __revokedDevices: raw.__revokedDevices || {},
-        test_results: {},
-      };
-    }
-
-    raw.users = raw.users || {};
-    raw.licenses = raw.licenses || {};
-    raw.__revokedDevices = raw.__revokedDevices || {};
-    raw.test_results = raw.test_results || {};
-    return raw;
+    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
   } catch {
-    return { users: {}, licenses: {}, __revokedDevices: {},test_results: {} };
+    return {};
   }
 }
-
 function saveDB(db) {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
@@ -85,126 +65,7 @@ function yyyymmddToday() {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}${m}${day}`;
 }
-function makeUserId() {
-  // ngắn gọn, đủ unique cho DB file
-  return "U_" + crypto.randomBytes(6).toString("hex"); // ví dụ U_a1b2c3d4e5f6
-}
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-/** ===== LƯU KẾT QUẢ BÀI KIỂM TRA (THÊM MỚI) ===== */
-app.post("/api/save-test-result", (req, res) => {
-  const { userId, license, deviceId, testName, score } = req.body || {};
-  
-  // Validation
-  if (!userId || !license || !testName || score !== 100) {
-    return res.status(400).json({ error: "Invalid data" });
-  }
-
-  try {
-    const db = loadDB();
-    
-    // Khởi tạo collection test_results nếu chưa có
-    if (!db.test_results) {
-      db.test_results = {};
-    }
-
-    // Tạo key duy nhất cho bài test của user
-    const testKey = `${userId}_${testName}`;
-    
-    // Lấy kết quả hiện tại
-    let result = db.test_results[testKey] || {
-      testKey,
-      userId,
-      testName,
-      count: 0,
-      completed: false,
-      lastUpdated: new Date().toISOString(),
-      history: []
-    };
-
-    // Chỉ tăng count nếu chưa đạt 3 và chưa hoàn thành
-    if (!result.completed && result.count < 3) {
-      result.count += 1;
-      result.history.push({
-        timestamp: new Date().toISOString(),
-        deviceId,
-        license
-      });
-      
-      // Kiểm tra nếu đủ 3 lần
-      if (result.count >= 3) {
-        result.completed = true;
-        result.completedAt = new Date().toISOString();
-      }
-      
-      result.lastUpdated = new Date().toISOString();
-      
-      // Lưu vào DB
-      db.test_results[testKey] = result;
-      saveDB(db);
-    }
-
-    // Trả về kết quả
-    return res.status(200).json({
-      ok: true,
-      count: result.count,
-      completed: result.completed,
-      message: result.completed ? "Đã hoàn thành bài học!" : `Đã đạt ${result.count}/3 lần 100%`
-    });
-
-  } catch (error) {
-    console.error("Save test result error:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/** ===== LẤY TRẠNG THÁI BÀI KIỂM TRA (THÊM MỚI) ===== */
-app.get("/api/get-test-status", (req, res) => {
-  const { userId, testName } = req.query;
-
-  if (!userId || !testName) {
-    return res.status(400).json({ error: "Missing userId or testName" });
-  }
-
-  try {
-    const db = loadDB();
-    
-    // Nếu chưa có collection test_results
-    if (!db.test_results) {
-      return res.status(200).json({
-        count: 0,
-        completed: false
-      });
-    }
-
-    const testKey = `${userId}_${testName}`;
-    const result = db.test_results[testKey];
-
-    if (!result) {
-      return res.status(200).json({
-        count: 0,
-        completed: false
-      });
-    }
-
-    return res.status(200).json({
-      count: result.count || 0,
-      completed: result.completed || false
-    });
-
-  } catch (error) {
-    console.error("Get test status error:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/** ===== Health check (để test nhanh) ===== */
-app.get("/api/ping", (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
-});
 /** ===== Health check (để test nhanh) ===== */
 app.get("/api/ping", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
@@ -212,121 +73,62 @@ app.get("/api/ping", (req, res) => {
 
 app.post("/api/verify", (req, res) => {
   const { deviceId, license } = req.body || {};
-  if (!deviceId || !license) return res.status(400).send("Missing deviceId/license");
+  if (!deviceId || !license)
+    return res.status(400).send("Missing deviceId/license");
 
   const p = parseLicense(license);
   if (!p) return res.status(400).send("Bad license format");
 
-  const db = loadDB();
+  // hạn dùng
+  const today = yyyymmddToday();
+  if (p.expiry < today) return res.status(403).send("Expired");
 
-  // Chặn nếu thiết bị bị revoke
+  // hash đúng?
+  const expected = computeLicenseHash(deviceId, p.expiry);
+  if (expected !== p.hash) return res.status(403).send("Invalid");
+
+  // bind 1 license <-> 1 device
+  const db = loadDB();
+  const rec = db[license];
+
+  //Chặn nếu thiết bị đã bị admin thu hồi
   if (db.__revokedDevices && db.__revokedDevices[deviceId]) {
     return res.status(403).send("Device revoked");
   }
 
-  // hạn dùng theo license format
-  const today = yyyymmddToday();
-  if (p.expiry < today) return res.status(403).send("Expired");
-
-  // hash đúng (vẫn giữ chống share)
-  const expected = computeLicenseHash(deviceId, p.expiry);
-  if (expected !== p.hash) return res.status(403).send("Invalid");
-
-  // lấy record license trong db.licenses
-  db.licenses = db.licenses || {};
-  const rec = db.licenses[license];
-
-  // nếu chưa có record -> tạo tạm (khuyến nghị: luôn generate qua admin)
   if (!rec) {
-    // tạo user “tạm” theo license (để không crash)
-    const tempUserId = "U_" + sha256Hex(license).slice(0, 12);
-
-    db.users = db.users || {};
-    if (!db.users[tempUserId]) {
-      db.users[tempUserId] = {
-        userName: "User",
-        examDate: "",
-        userExpiry: p.expiry,     // mặc định theo license
-        status: "ACTIVE",
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
-      };
-    }
-
-    db.licenses[license] = {
+    // Fallback: nếu vì lý do nào đó license chưa được tạo qua admin/generate
+    db[license] = {
       deviceId,
       expiry: p.expiry,
-      userId: tempUserId,
-      createdAt: nowIso(),
-      firstUsedAt: nowIso(),
+      userName: "User",
+      examDate: "", // ✅ NEW
+      firstUsedAt: new Date().toISOString(),
     };
     saveDB(db);
-
-    const u = db.users[tempUserId];
-    if (u.status === "REVOKED") return res.status(403).send("User revoked");
-
-    // nếu bạn muốn: userExpiry có thể override license expiry
-    const effectiveExpiry = u.userExpiry || p.expiry;
-    if (effectiveExpiry < today) return res.status(403).send("Expired");
-
     return res.json({
       ok: true,
-      userId: tempUserId,
-      userStatus: u.status,
-      expiry: effectiveExpiry,
-      userName: u.userName || "User",
-      examDate: u.examDate || "",
+      expiry: p.expiry,
+      userName: db[license].userName,
+      examDate: db[license].examDate || "", // ✅ NEW
       bound: true,
       firstBind: true,
     });
   }
 
-  // check bind 1 license <-> 1 device
   if (rec.deviceId !== deviceId) {
     return res.status(403).send("License already bound to another device");
   }
 
-  // user record
-  const userId = rec.userId;
-  db.users = db.users || {};
-  const u = db.users[userId];
-
-  // nếu user không tồn tại (data bẩn) -> tạo lại cho khỏi chết
-  if (!u) {
-    db.users[userId] = {
-      userName: "User",
-      examDate: "",
-      userExpiry: rec.expiry,
-      status: "ACTIVE",
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-    };
-    saveDB(db);
-  }
-
-  const user = db.users[userId];
-
-  // revoke theo user
-  if (user.status === "REVOKED") {
-    return res.status(403).send("User revoked");
-  }
-
-  // hạn theo user (đây là chỗ “gia hạn theo nhóm”)
-  const effectiveExpiry = user.userExpiry || rec.expiry || p.expiry;
-  if (effectiveExpiry < today) return res.status(403).send("Expired");
-
   return res.json({
     ok: true,
-    userId,
-    userStatus: user.status || "ACTIVE",
-    expiry: effectiveExpiry,
-    userName: user.userName || "User",
-    examDate: user.examDate || "",
+    expiry: p.expiry,
+    userName: rec.userName || "User",
+    examDate: rec.examDate || "", // ✅ NEW
     bound: true,
     firstBind: false,
   });
 });
-
 
 app.post("/api/request-reset", (req, res) => {
   const { deviceId, oldLicense, note } = req.body || {};
@@ -339,59 +141,35 @@ app.post("/api/request-reset", (req, res) => {
   res.json({ ok: true });
 });
 
+// Admin generate (PHẢI khóa)
 app.post("/api/admin/generate", (req, res) => {
   if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
   const key = req.header("x-admin-key");
   if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
 
-  // NEW: userId optional
-  const { deviceId, expiry, userId, userName, examDate, userExpiry } = req.body || {};
-  if (!deviceId || !expiry) {
-    return res.status(400).send("Missing deviceId/expiry");
+  // ✅ NEW: nhận thêm userName + examDate (examDate dạng YYYYMMDD, ví dụ 20260707)
+  const { deviceId, expiry, userName, examDate } = req.body || {};
+  if (!deviceId || !expiry || !userName) {
+    return res.status(400).send("Missing deviceId/expiry/userName");
   }
-
-  const db = loadDB();
-  db.users = db.users || {};
-  db.licenses = db.licenses || {};
-
-  // nếu chưa có userId -> tạo user mới
-  const uid = userId || makeUserId();
-
-  // upsert user
-  const existed = db.users[uid];
-  db.users[uid] = {
-    userName: (userName || existed?.userName || "User").trim(),
-    examDate: examDate || existed?.examDate || "",
-    userExpiry: userExpiry || existed?.userExpiry || expiry, // default theo expiry license
-    status: existed?.status || "ACTIVE",
-    createdAt: existed?.createdAt || nowIso(),
-    updatedAt: nowIso(),
-  };
 
   const hash = computeLicenseHash(deviceId, expiry);
   const license = `${expiry}-${hash}`;
 
-  // lưu license record thuộc user
-  db.licenses[license] = {
+  // ✅ lưu vào DB để sau này verify trả về userName + examDate
+  const db = loadDB();
+  db[license] = {
     deviceId,
     expiry,
-    userId: uid,
-    createdAt: nowIso(),
+    userName,
+    examDate: examDate || "", // ✅ NEW
+    createdAt: new Date().toISOString(),
   };
-
   saveDB(db);
 
-  res.json({
-    license,
-    expiry,
-    userId: uid,
-    userName: db.users[uid].userName,
-    examDate: db.users[uid].examDate,
-    userExpiry: db.users[uid].userExpiry,
-    status: db.users[uid].status,
-  });
+  // trả về license + userName + examDate
+  res.json({ license, expiry, userName, examDate: examDate || "" });
 });
-
 
 // Admin revoke device (PHẢI khóa)
 app.post("/api/admin/revoke-device", (req, res) => {
@@ -412,67 +190,6 @@ app.post("/api/admin/revoke-device", (req, res) => {
 
   res.json({ ok: true });
 });
-// Admin revoke USER (thu hồi theo nhóm)
-app.post("/api/admin/revoke-user", (req, res) => {
-  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
-  const key = req.header("x-admin-key");
-  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
-
-  const { userId, reason } = req.body || {};
-  if (!userId) return res.status(400).send("Missing userId");
-
-  const db = loadDB();
-  db.users = db.users || {};
-  if (!db.users[userId]) return res.status(404).send("User not found");
-
-  db.users[userId].status = "REVOKED";
-  db.users[userId].revokedReason = reason || "";
-  db.users[userId].updatedAt = nowIso();
-  saveDB(db);
-
-  res.json({ ok: true });
-});
-
-// Admin un-revoke USER (cấp lại quyền theo nhóm)
-app.post("/api/admin/unrevoke-user", (req, res) => {
-  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
-  const key = req.header("x-admin-key");
-  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
-
-  const { userId } = req.body || {};
-  if (!userId) return res.status(400).send("Missing userId");
-
-  const db = loadDB();
-  db.users = db.users || {};
-  if (!db.users[userId]) return res.status(404).send("User not found");
-
-  db.users[userId].status = "ACTIVE";
-  delete db.users[userId].revokedReason;
-  db.users[userId].updatedAt = nowIso();
-  saveDB(db);
-
-  res.json({ ok: true });
-});
-// Admin extend USER expiry (gia hạn theo nhóm)
-app.post("/api/admin/extend-user", (req, res) => {
-  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
-  const key = req.header("x-admin-key");
-  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
-
-  const { userId, userExpiry } = req.body || {};
-  if (!userId || !userExpiry) return res.status(400).send("Missing userId/userExpiry");
-
-  const db = loadDB();
-  db.users = db.users || {};
-  if (!db.users[userId]) return res.status(404).send("User not found");
-
-  db.users[userId].userExpiry = userExpiry;
-  db.users[userId].updatedAt = nowIso();
-  saveDB(db);
-
-  res.json({ ok: true, userId, userExpiry });
-});
-
 
 // Admin UN-revoke device (cấp lại quyền)
 app.post("/api/admin/unrevoke-device", (req, res) => {
