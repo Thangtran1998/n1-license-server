@@ -10,6 +10,7 @@ const app = express();
  * - ALLOW_ORIGIN: domain được phép gọi API (GitHub Pages của anh)
  * - ADMIN_KEY: khóa endpoint generate
  */
+
 const SECRET = process.env.LICENSE_SECRET;
 if (!SECRET) {
   throw new Error("Missing env LICENSE_SECRET");
@@ -36,7 +37,7 @@ app.use(express.json());
 /** ===== DB ===== */
 function loadDB() {
   if (!fs.existsSync(DB_FILE)) {
-    return { users: {}, licenses: {}, __revokedDevices: {} };
+    return { users: {}, licenses: {}, __revokedDevices: {},test_results: {} };
   }
   try {
     const raw = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
@@ -47,15 +48,17 @@ function loadDB() {
         users: {},
         licenses: raw || {},
         __revokedDevices: raw.__revokedDevices || {},
+        test_results: {},
       };
     }
 
     raw.users = raw.users || {};
     raw.licenses = raw.licenses || {};
     raw.__revokedDevices = raw.__revokedDevices || {};
+    raw.test_results = raw.test_results || {};
     return raw;
   } catch {
-    return { users: {}, licenses: {}, __revokedDevices: {} };
+    return { users: {}, licenses: {}, __revokedDevices: {},test_results: {} };
   }
 }
 
@@ -91,7 +94,117 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/** ===== LƯU KẾT QUẢ BÀI KIỂM TRA (THÊM MỚI) ===== */
+app.post("/api/save-test-result", (req, res) => {
+  const { userId, license, deviceId, testName, score } = req.body || {};
+  
+  // Validation
+  if (!userId || !license || !testName || score !== 100) {
+    return res.status(400).json({ error: "Invalid data" });
+  }
 
+  try {
+    const db = loadDB();
+    
+    // Khởi tạo collection test_results nếu chưa có
+    if (!db.test_results) {
+      db.test_results = {};
+    }
+
+    // Tạo key duy nhất cho bài test của user
+    const testKey = `${userId}_${testName}`;
+    
+    // Lấy kết quả hiện tại
+    let result = db.test_results[testKey] || {
+      testKey,
+      userId,
+      testName,
+      count: 0,
+      completed: false,
+      lastUpdated: new Date().toISOString(),
+      history: []
+    };
+
+    // Chỉ tăng count nếu chưa đạt 3 và chưa hoàn thành
+    if (!result.completed && result.count < 3) {
+      result.count += 1;
+      result.history.push({
+        timestamp: new Date().toISOString(),
+        deviceId,
+        license
+      });
+      
+      // Kiểm tra nếu đủ 3 lần
+      if (result.count >= 3) {
+        result.completed = true;
+        result.completedAt = new Date().toISOString();
+      }
+      
+      result.lastUpdated = new Date().toISOString();
+      
+      // Lưu vào DB
+      db.test_results[testKey] = result;
+      saveDB(db);
+    }
+
+    // Trả về kết quả
+    return res.status(200).json({
+      ok: true,
+      count: result.count,
+      completed: result.completed,
+      message: result.completed ? "Đã hoàn thành bài học!" : `Đã đạt ${result.count}/3 lần 100%`
+    });
+
+  } catch (error) {
+    console.error("Save test result error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** ===== LẤY TRẠNG THÁI BÀI KIỂM TRA (THÊM MỚI) ===== */
+app.get("/api/get-test-status", (req, res) => {
+  const { userId, testName } = req.query;
+
+  if (!userId || !testName) {
+    return res.status(400).json({ error: "Missing userId or testName" });
+  }
+
+  try {
+    const db = loadDB();
+    
+    // Nếu chưa có collection test_results
+    if (!db.test_results) {
+      return res.status(200).json({
+        count: 0,
+        completed: false
+      });
+    }
+
+    const testKey = `${userId}_${testName}`;
+    const result = db.test_results[testKey];
+
+    if (!result) {
+      return res.status(200).json({
+        count: 0,
+        completed: false
+      });
+    }
+
+    return res.status(200).json({
+      count: result.count || 0,
+      completed: result.completed || false
+    });
+
+  } catch (error) {
+    console.error("Get test status error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** ===== Health check (để test nhanh) ===== */
+app.get("/api/ping", (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
 /** ===== Health check (để test nhanh) ===== */
 app.get("/api/ping", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
