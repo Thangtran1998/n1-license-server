@@ -1,7 +1,8 @@
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-const express = require("express");
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import express from "express";
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -13,6 +14,10 @@ const PORT = process.env.PORT || 3000;
 const LICENSE_SECRET = process.env.LICENSE_SECRET || "CHANGE_ME_SECRET";
 const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME_ADMIN_KEY";
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
+
+// __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // DB file
 const DB_PATH = path.join(__dirname, "license-db.json");
@@ -35,14 +40,13 @@ function loadDB() {
   try {
     const raw = fs.readFileSync(DB_PATH, "utf-8");
     const db = JSON.parse(raw);
-    // Ensure system buckets
     db.__revokedDevices = db.__revokedDevices || {};
     db.__revokedUsers = db.__revokedUsers || {};
-    db.__users = db.__users || {}; // userId -> { userName, examDate, createdAt }
-    db.__userDevices = db.__userDevices || {}; // userId -> { devices: { deviceId: true }, lastSeenAt }
-    db.__progress = db.__progress || {}; // userId -> { testId -> { perfectCount, updatedAt, recentAttempts } }
+    db.__users = db.__users || {};
+    db.__userDevices = db.__userDevices || {};
+    db.__progress = db.__progress || {};
     return db;
-  } catch (e) {
+  } catch {
     return {
       __revokedDevices: {},
       __revokedUsers: {},
@@ -100,7 +104,6 @@ function adminOnly(req, res, next) {
 // =====================
 function normalizeUserId(userId) {
   const s = String(userId || "").trim();
-  // allow a-zA-Z0-9_- up to 64 chars
   if (!s) return "";
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(s)) return "";
   return s;
@@ -112,10 +115,8 @@ function ensureUserRecord(db, userId, userName, examDate) {
     examDate: String(examDate || "").trim(),
     createdAt: new Date().toISOString(),
   };
-  // keep latest display fields
   if (userName) db.__users[userId].userName = String(userName).trim();
   if (examDate) db.__users[userId].examDate = String(examDate).trim();
-
   db.__userDevices[userId] = db.__userDevices[userId] || { devices: {}, lastSeenAt: "" };
 }
 
@@ -156,7 +157,6 @@ function authFromDeviceLicense(db, deviceId, license) {
   if (isDeviceRevoked(db, deviceId)) return { ok: false, code: 403, msg: "Device revoked" };
   if (isUserRevoked(db, userId)) return { ok: false, code: 403, msg: "User revoked" };
 
-  // update last seen
   attachDeviceToUser(db, userId, deviceId);
   saveDB(db);
 
@@ -179,11 +179,9 @@ function calcPercentFromPerfectCount(c) {
 // =====================
 // ROUTES
 // =====================
-
-// Health
 app.get("/", (req, res) => res.send("OK"));
 
-// ADMIN: generate license (create user if missing)
+// ADMIN: generate license
 app.post("/api/admin/generate", adminOnly, (req, res) => {
   const { deviceId, expiry, userId, userName, examDate } = req.body || {};
   if (!deviceId || !expiry || !userName) return res.status(400).send("Missing deviceId/expiry/userName");
@@ -192,10 +190,7 @@ app.post("/api/admin/generate", adminOnly, (req, res) => {
   const db = loadDB();
 
   let uid = normalizeUserId(userId);
-  if (!uid) {
-    // auto-generate stable id
-    uid = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
-  }
+  if (!uid) uid = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
 
   ensureUserRecord(db, uid, userName, examDate);
   attachDeviceToUser(db, uid, deviceId);
@@ -224,7 +219,7 @@ app.post("/api/admin/generate", adminOnly, (req, res) => {
   });
 });
 
-// USER: verify license
+// USER: verify
 app.post("/api/verify", (req, res) => {
   const { deviceId, license } = req.body || {};
   if (!deviceId || !license) return res.status(400).send("Missing deviceId/license");
@@ -267,10 +262,7 @@ app.post("/api/admin/revoke-device", adminOnly, (req, res) => {
   if (!deviceId) return res.status(400).send("Missing deviceId");
 
   const db = loadDB();
-  db.__revokedDevices[deviceId] = {
-    reason: String(reason || "revoked").slice(0, 200),
-    at: new Date().toISOString(),
-  };
+  db.__revokedDevices[deviceId] = { reason: String(reason || "revoked").slice(0, 200), at: new Date().toISOString() };
   saveDB(db);
   res.json({ ok: true, deviceId, revoked: true });
 });
@@ -285,7 +277,7 @@ app.post("/api/admin/unrevoke-device", adminOnly, (req, res) => {
   res.json({ ok: true, deviceId, revoked: false });
 });
 
-// ADMIN: revoke/unrevoke USER
+// ADMIN: revoke/unrevoke user (locks ALL devices)
 app.post("/api/admin/revoke-user", adminOnly, (req, res) => {
   const { userId, reason } = req.body || {};
   const uid = normalizeUserId(userId);
@@ -294,11 +286,7 @@ app.post("/api/admin/revoke-user", adminOnly, (req, res) => {
   const db = loadDB();
   ensureUserRecord(db, uid);
 
-  db.__revokedUsers[uid] = {
-    reason: String(reason || "revoked").slice(0, 200),
-    at: new Date().toISOString(),
-  };
-
+  db.__revokedUsers[uid] = { reason: String(reason || "revoked").slice(0, 200), at: new Date().toISOString() };
   saveDB(db);
   res.json({ ok: true, userId: uid, revoked: true });
 });
@@ -324,12 +312,9 @@ app.post("/api/admin/user-info", adminOnly, (req, res) => {
   const user = db.__users[uid] || null;
   const devices = Object.keys((db.__userDevices[uid] && db.__userDevices[uid].devices) || {});
   const licenses = [];
-
   for (const [k, v] of Object.entries(db)) {
     if (k.startsWith("__")) continue;
-    if (v && v.userId === uid) {
-      licenses.push({ license: k, deviceId: v.deviceId, expiry: v.expiry, createdAt: v.createdAt });
-    }
+    if (v && v.userId === uid) licenses.push({ license: k, deviceId: v.deviceId, expiry: v.expiry, createdAt: v.createdAt });
   }
 
   res.json({
@@ -337,10 +322,7 @@ app.post("/api/admin/user-info", adminOnly, (req, res) => {
     userId: uid,
     user,
     revoked: isUserRevoked(db, uid),
-    devices: devices.map((d) => ({
-      deviceId: d,
-      revoked: isDeviceRevoked(db, d),
-    })),
+    devices: devices.map((d) => ({ deviceId: d, revoked: isDeviceRevoked(db, d) })),
     licenses,
   });
 });
@@ -364,14 +346,8 @@ app.post("/api/progress/get", (req, res) => {
     if (!tid) continue;
     const rec = bucket[tid] || { perfectCount: 0 };
     const perfectCount = clampInt(rec.perfectCount || 0, 0, 3);
-    out[tid] = {
-      perfectCount,
-      percent: calcPercentFromPerfectCount(perfectCount),
-      completed: perfectCount >= 3,
-      updatedAt: rec.updatedAt || "",
-    };
+    out[tid] = { perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3, updatedAt: rec.updatedAt || "" };
   }
-
   res.json({ ok: true, userId: auth.userId, data: out });
 });
 
@@ -390,11 +366,7 @@ app.post("/api/progress/mark-perfect", (req, res) => {
   db.__progress[auth.userId] = db.__progress[auth.userId] || {};
   const bucket = db.__progress[auth.userId];
 
-  const rec = (bucket[tid] = bucket[tid] || {
-    perfectCount: 0,
-    updatedAt: "",
-    recentAttempts: [],
-  });
+  const rec = (bucket[tid] = bucket[tid] || { perfectCount: 0, updatedAt: "", recentAttempts: [] });
 
   const aId = String(attemptId || "").trim();
   rec.recentAttempts = Array.isArray(rec.recentAttempts) ? rec.recentAttempts : [];
@@ -402,13 +374,7 @@ app.post("/api/progress/mark-perfect", (req, res) => {
     if (rec.recentAttempts.includes(aId)) {
       const perfectCount = clampInt(rec.perfectCount || 0, 0, 3);
       saveDB(db);
-      return res.json({
-        ok: true,
-        deduped: true,
-        perfectCount,
-        percent: calcPercentFromPerfectCount(perfectCount),
-        completed: perfectCount >= 3,
-      });
+      return res.json({ ok: true, deduped: true, perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3 });
     }
     rec.recentAttempts.push(aId);
     if (rec.recentAttempts.length > 20) rec.recentAttempts.shift();
@@ -416,18 +382,10 @@ app.post("/api/progress/mark-perfect", (req, res) => {
 
   rec.perfectCount = clampInt((rec.perfectCount || 0) + 1, 0, 3);
   rec.updatedAt = new Date().toISOString();
-
   saveDB(db);
 
   const perfectCount = rec.perfectCount;
-  res.json({
-    ok: true,
-    perfectCount,
-    percent: calcPercentFromPerfectCount(perfectCount),
-    completed: perfectCount >= 3,
-  });
+  res.json({ ok: true, perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3 });
 });
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on port", PORT));
