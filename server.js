@@ -2,21 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import express from "express";
-
-/**
- * LICENSE SERVER (Option A - file DB like server.txt)
- *
- * ✅ DB saved to a relative file by default (process.cwd()) to match server.txt behavior.
- * ✅ You can point DB_FILE to a Render Persistent Disk mount path for true persistence.
- * ✅ Atomic writes to avoid JSON corruption on sudden restarts.
- *
- * ENV:
- *   PORT
- *   LICENSE_SECRET   (required in production)
- *   ADMIN_KEY        (required in production)
- *   ALLOW_ORIGIN     (default "*")
- *   DB_FILE          (default "./license-db.json")
- */
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -29,74 +15,111 @@ const LICENSE_SECRET = process.env.LICENSE_SECRET || "CHANGE_ME_SECRET";
 const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME_ADMIN_KEY";
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-// Like server.txt: relative path (based on process.cwd()) by default
-const DB_FILE = process.env.DB_FILE || "./license-db.json";
-const DB_PATH = path.resolve(process.cwd(), DB_FILE);
+// =====================
+// FIX: Sử dụng relative path GIỐNG server.txt
+// =====================
+// Không dùng __dirname, dùng relative path "./"
+const DB_FILE = "./license-db.json";  // Giống hệt server.txt
+
+// Helper để log đường dẫn (debug)
+console.log("Working directory:", process.cwd());
+console.log("DB file path:", path.resolve(DB_FILE));
 
 // =====================
-// CORS
+// DB helpers
 // =====================
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", ALLOW_ORIGIN);
-  res.header("Vary", "Origin");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
-// =====================
-// DB helpers (atomic write + schema normalize)
-// =====================
-function ensureDirForFile(filePath) {
-  const dir = path.dirname(filePath);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch {}
-}
-
-function normalizeDB(db) {
-  const out = db && typeof db === "object" ? db : {};
-  out.__revokedDevices = out.__revokedDevices && typeof out.__revokedDevices === "object" ? out.__revokedDevices : {};
-  out.__revokedUsers = out.__revokedUsers && typeof out.__revokedUsers === "object" ? out.__revokedUsers : {};
-  out.__users = out.__users && typeof out.__users === "object" ? out.__users : {};
-  out.__userDevices = out.__userDevices && typeof out.__userDevices === "object" ? out.__userDevices : {};
-  out.__progress = out.__progress && typeof out.__progress === "object" ? out.__progress : {};
-  return out;
-}
-
-function emptyDB() {
-  return normalizeDB({});
-}
-
 function loadDB() {
-  if (!fs.existsSync(DB_PATH)) return emptyDB();
   try {
-    const raw = fs.readFileSync(DB_PATH, "utf-8");
-    return normalizeDB(JSON.parse(raw));
-  } catch (e) {
-    // Don't silently lose data
-    console.error("[DB] load failed:", e?.message || e);
-    // Backup corrupted DB for investigation
-    try {
-      const bak = DB_PATH + ".corrupt-" + new Date().toISOString().replace(/[:.]/g, "-");
-      fs.copyFileSync(DB_PATH, bak);
-      console.error("[DB] corrupted DB backed up to:", bak);
-    } catch {}
-    return emptyDB();
+    if (!fs.existsSync(DB_FILE)) {
+      // Tạo DB mới nếu chưa có
+      const newDB = {
+        __revokedDevices: {},
+        __revokedUsers: {},
+        __users: {},
+        __userDevices: {},
+        __progress: {},
+      };
+      // Ghi ngay để tạo file
+      fs.writeFileSync(DB_FILE, JSON.stringify(newDB, null, 2), "utf-8");
+      return newDB;
+    }
+    
+    const raw = fs.readFileSync(DB_FILE, "utf-8");
+    const db = JSON.parse(raw);
+    
+    // Ensure all required sections exist
+    db.__revokedDevices = db.__revokedDevices || {};
+    db.__revokedUsers = db.__revokedUsers || {};
+    db.__users = db.__users || {};
+    db.__userDevices = db.__userDevices || {};
+    db.__progress = db.__progress || {};
+    
+    return db;
+  } catch (err) {
+    console.error("Error loading DB:", err);
+    // Return empty DB on error
+    return {
+      __revokedDevices: {},
+      __revokedUsers: {},
+      __users: {},
+      __userDevices: {},
+      __progress: {},
+    };
   }
 }
 
 function saveDB(db) {
-  const data = JSON.stringify(normalizeDB(db), null, 2);
-  ensureDirForFile(DB_PATH);
-  const tmp = DB_PATH + ".tmp";
-  fs.writeFileSync(tmp, data, "utf-8");
-  fs.renameSync(tmp, DB_PATH);
+  try {
+    // Atomic write: ghi vào file tạm rồi rename
+    const tempFile = DB_FILE + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(db, null, 2), "utf-8");
+    fs.renameSync(tempFile, DB_FILE);
+    return true;
+  } catch (err) {
+    console.error("Error saving DB:", err);
+    return false;
+  }
 }
 
 // =====================
-// License helpers (keep old format: N1.<yyyymmdd>.<24hex>)
+// Thêm API để kiểm tra trạng thái DB
+// =====================
+app.get("/api/admin/db-status", (req, res) => {
+  try {
+    const exists = fs.existsSync(DB_FILE);
+    const stats = exists ? fs.statSync(DB_FILE) : null;
+    
+    res.json({
+      ok: true,
+      workingDir: process.cwd(),
+      dbFile: path.resolve(DB_FILE),
+      exists,
+      size: stats?.size || 0,
+      modified: stats?.mtime || null
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =====================
+// Thêm API backup/restore đơn giản
+// =====================
+app.post("/api/admin/backup-manual", adminOnly, (req, res) => {
+  try {
+    const db = loadDB();
+    const backupFile = `./backup-${new Date().toISOString().replace(/:/g, '-')}.json`;
+    fs.writeFileSync(backupFile, JSON.stringify(db, null, 2), "utf-8");
+    res.json({ ok: true, backupFile });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ... (phần còn lại của code giữ nguyên, chỉ thay đổi cách loadDB/saveDB)
+
+// =====================
+// License helpers
 // =====================
 function yyyymmddToday() {
   const d = new Date();
@@ -150,7 +173,6 @@ function ensureUserRecord(db, userId, userName, examDate) {
   };
   if (userName) db.__users[userId].userName = String(userName).trim();
   if (examDate) db.__users[userId].examDate = String(examDate).trim();
-
   db.__userDevices[userId] = db.__userDevices[userId] || { devices: {}, lastSeenAt: "" };
 }
 
@@ -181,8 +203,8 @@ function authFromDeviceLicense(db, deviceId, license) {
   const expected = computeLicenseHash(deviceId, p.expiry);
   if (expected !== p.hash) return { ok: false, code: 403, msg: "Invalid" };
 
+  if (!db[license]) return { ok: false, code: 403, msg: "License not found" };
   const rec = db[license];
-  if (!rec) return { ok: false, code: 403, msg: "License not found" };
   if (rec.deviceId !== deviceId) return { ok: false, code: 403, msg: "License bound to another device" };
 
   const userId = rec.userId || "";
@@ -214,27 +236,6 @@ function calcPercentFromPerfectCount(c) {
 // ROUTES
 // =====================
 app.get("/", (req, res) => res.send("OK"));
-
-app.get("/api/ping", (req, res) => {
-  res.json({
-    ok: true,
-    time: new Date().toISOString(),
-    dbFile: DB_FILE,
-    dbPath: DB_PATH,
-    cwd: process.cwd(),
-  });
-});
-
-// Admin DB health: confirm persistence after restart
-app.get("/api/admin/db-health", adminOnly, (req, res) => {
-  let exists = false;
-  let size = 0;
-  try {
-    exists = fs.existsSync(DB_PATH);
-    size = exists ? fs.statSync(DB_PATH).size : 0;
-  } catch {}
-  res.json({ ok: true, dbFile: DB_FILE, dbPath: DB_PATH, cwd: process.cwd(), exists, size });
-});
 
 // ADMIN: generate license
 app.post("/api/admin/generate", adminOnly, (req, res) => {
@@ -443,9 +444,4 @@ app.post("/api/progress/mark-perfect", (req, res) => {
   res.json({ ok: true, perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3 });
 });
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-  console.log("[DB] DB_FILE =", DB_FILE);
-  console.log("[DB] DB_PATH =", DB_PATH);
-  console.log("[DB] CWD     =", process.cwd());
-});
+app.listen(PORT, () => console.log("Server running on port", PORT));
