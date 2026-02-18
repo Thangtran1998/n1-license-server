@@ -41,7 +41,7 @@ function loadDB() {
       __revokedUsers: {},
       __users: {},
       __userDevices: {},
-      __progress: {},      // progress theo userId
+      __progress: {},
     };
   }
   try {
@@ -51,7 +51,7 @@ function loadDB() {
     db.__revokedUsers = db.__revokedUsers || {};
     db.__users = db.__users || {};
     db.__userDevices = db.__userDevices || {};
-    db.__progress = db.__progress || {};  // CHIA SẺ: progress theo userId
+    db.__progress = db.__progress || {};
     return db;
   } catch {
     return {
@@ -74,12 +74,11 @@ function sha256Hex(s) {
 }
 
 function computeLicenseHash(deviceId, expiry) {
-  // Chỉ lấy 24 ký tự đầu cho format N1.YYYYMMDD.24char
-  return sha256Hex(`${deviceId}|${expiry}|${SECRET}`).slice(0, 24);
+return sha256Hex(`${deviceId}|${expiry}|${SECRET}`).slice(0, 24); // Chỉ lấy 24 ký tự đầu
 }
 
 function parseLicense(license) {
-  // Hỗ trợ cả format cũ (yyyymmdd-hash64) và format mới (N1.yyyymmdd.hash24)
+  // Hỗ trợ cả format cũ (yyyymmdd-hash) và format mới (N1.yyyymmdd.hash)
   const s = String(license || "").trim();
   
   // Format cũ: 20261231-hash64
@@ -126,9 +125,6 @@ function ensureUserRecord(db, userId, userName, examDate) {
   if (userName) db.__users[userId].userName = String(userName).trim();
   if (examDate) db.__users[userId].examDate = String(examDate).trim();
   db.__userDevices[userId] = db.__userDevices[userId] || { devices: {}, lastSeenAt: "" };
-  
-  // Đảm bảo mỗi user có object progress riêng (CHIA SẺ CHO ALL DEVICES)
-  db.__progress[userId] = db.__progress[userId] || {};
 }
 
 function attachDeviceToUser(db, userId, deviceId) {
@@ -159,40 +155,6 @@ function calcPercentFromPerfectCount(c) {
   return 100;
 }
 
-/**
- * Kiểm tra license và trả về userId nếu hợp lệ
- */
-function verifyAndGetUserId(db, deviceId, license) {
-  const p = parseLicense(license);
-  if (!p) return { ok: false, code: 400, msg: "Bad license format" };
-
-  const today = yyyymmddToday();
-  if (p.expiry < today) return { ok: false, code: 403, msg: "Expired" };
-
-  const expected = computeLicenseHash(deviceId, p.expiry);
-  if (expected !== p.hash) return { ok: false, code: 403, msg: "Invalid" };
-
-  const rec = db[license];
-  if (!rec) return { ok: false, code: 403, msg: "License not found" };
-  
-  if (rec.deviceId !== deviceId) {
-    return { ok: false, code: 403, msg: "License bound to another device" };
-  }
-
-  const userId = rec.userId || "";
-  if (!userId) return { ok: false, code: 500, msg: "License missing userId" };
-
-  if (isDeviceRevoked(db, deviceId)) {
-    return { ok: false, code: 403, msg: "Device revoked" };
-  }
-  
-  if (isUserRevoked(db, userId)) {
-    return { ok: false, code: 403, msg: "User revoked" };
-  }
-
-  return { ok: true, userId, rec };
-}
-
 /** ===== Health check ===== */
 app.get("/api/ping", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
@@ -204,26 +166,77 @@ app.post("/api/verify", (req, res) => {
   if (!deviceId || !license)
     return res.status(400).send("Missing deviceId/license");
 
+  const p = parseLicense(license);
+  if (!p) return res.status(400).send("Bad license format");
+
+  // Check expiry
+  const today = yyyymmddToday();
+  if (p.expiry < today) return res.status(403).send("Expired");
+
+  // Check hash
+  const expected = computeLicenseHash(deviceId, p.expiry);
+  if (expected !== p.hash) return res.status(403).send("Invalid");
+
   const db = loadDB();
-  const auth = verifyAndGetUserId(db, deviceId, license);
-  
-  if (!auth.ok) {
-    return res.status(auth.code).send(auth.msg);
+
+  // Check revoked
+  if (isDeviceRevoked(db, deviceId)) {
+    return res.status(403).send("Device revoked");
   }
 
-  // Cập nhật last seen
-  attachDeviceToUser(db, auth.userId, deviceId);
-  saveDB(db);
+  const rec = db[license];
 
-  const userInfo = db.__users[auth.userId] || {};
-  
+  if (!rec) {
+    // Legacy support: nếu license chưa có trong DB, tạo mới
+    const userId = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+    db[license] = {
+      deviceId,
+      expiry: p.expiry,
+      userId,
+      userName: "User",
+      examDate: "",
+      firstUsedAt: new Date().toISOString(),
+    };
+    
+    ensureUserRecord(db, userId, "User", "");
+    attachDeviceToUser(db, userId, deviceId);
+    saveDB(db);
+    
+    return res.json({
+      ok: true,
+      userId,
+      expiry: p.expiry,
+      userName: "User",
+      examDate: "",
+      bound: true,
+      firstBind: true,
+    });
+  }
+
+  // Check user revoked
+  const userId = rec.userId || "";
+  if (userId && isUserRevoked(db, userId)) {
+    return res.status(403).send("User revoked");
+  }
+
+  if (rec.deviceId !== deviceId) {
+    return res.status(403).send("License already bound to another device");
+  }
+
+  // Update user device tracking
+  if (userId) {
+    attachDeviceToUser(db, userId, deviceId);
+    saveDB(db);
+  }
+
   return res.json({
     ok: true,
-    userId: auth.userId,
-    expiry: auth.rec.expiry,
-    userName: userInfo.userName || "User",
-    examDate: userInfo.examDate || "",
+    userId: userId || "",
+    expiry: p.expiry,
+    userName: rec.userName || "User",
+    examDate: rec.examDate || "",
     bound: true,
+    firstBind: false,
   });
 });
 
@@ -262,7 +275,7 @@ app.post("/api/admin/generate", (req, res) => {
     uid = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
   }
 
-  // Tạo license với format mới (N1.expiry.hash24)
+  // Tạo license với format mới (N1.expiry.hash)
   const hash = computeLicenseHash(deviceId, expiry);
   const license = `N1.${expiry}.${hash}`;
 
@@ -271,10 +284,12 @@ app.post("/api/admin/generate", (req, res) => {
     deviceId,
     expiry,
     userId: uid,
+    userName: String(userName || "").trim(),
+    examDate: String(examDate || "").trim(),
     createdAt: new Date().toISOString(),
   };
 
-  // Cập nhật user records (userName, examDate được lưu trong __users)
+  // Cập nhật user records
   ensureUserRecord(db, uid, userName, examDate);
   attachDeviceToUser(db, uid, deviceId);
   
@@ -391,9 +406,6 @@ app.post("/api/admin/user-info", (req, res) => {
     }
   }
 
-  // Lấy tiến độ của user
-  const progress = db.__progress[uid] || {};
-
   res.json({
     ok: true,
     userId: uid,
@@ -404,28 +416,42 @@ app.post("/api/admin/user-info", (req, res) => {
       revoked: isDeviceRevoked(db, d),
     })),
     licenses,
-    progress, // Trả về tiến độ để admin xem
   });
 });
 
-/** ===== Progress: Get (CHIA SẺ CHO CÙNG USER ID) ===== */
+/** ===== Progress: Get ===== */
 app.post("/api/progress/get", (req, res) => {
   const { deviceId, license, testIds } = req.body || {};
   if (!deviceId || !license) return res.status(400).send("Missing deviceId/license");
 
+  // Verify license
+  const p = parseLicense(license);
+  if (!p) return res.status(400).send("Bad license format");
+
+  const today = yyyymmddToday();
+  if (p.expiry < today) return res.status(403).send("Expired");
+
+  const expected = computeLicenseHash(deviceId, p.expiry);
+  if (expected !== p.hash) return res.status(403).send("Invalid");
+
   const db = loadDB();
-  const auth = verifyAndGetUserId(db, deviceId, license);
-  
-  if (!auth.ok) {
-    return res.status(auth.code).send(auth.msg);
-  }
+  const rec = db[license];
+  if (!rec) return res.status(403).send("License not found");
+  if (rec.deviceId !== deviceId) return res.status(403).send("License bound to another device");
 
-  // Cập nhật last seen
-  attachDeviceToUser(db, auth.userId, deviceId);
+  const userId = rec.userId || "";
+  if (!userId) return res.status(500).send("License missing userId");
 
-  // Lấy progress từ userId (CHIA SẺ CHO TẤT CẢ DEVICE CÙNG USER)
-  db.__progress[auth.userId] = db.__progress[auth.userId] || {};
-  const bucket = db.__progress[auth.userId];
+  // Check revoked
+  if (isDeviceRevoked(db, deviceId)) return res.status(403).send("Device revoked");
+  if (isUserRevoked(db, userId)) return res.status(403).send("User revoked");
+
+  // Update tracking
+  attachDeviceToUser(db, userId, deviceId);
+
+  // Get progress
+  db.__progress[userId] = db.__progress[userId] || {};
+  const bucket = db.__progress[userId];
 
   const list = Array.isArray(testIds) ? testIds : [];
   const out = {};
@@ -443,50 +469,60 @@ app.post("/api/progress/get", (req, res) => {
   }
   
   saveDB(db);
-  res.json({ 
-    ok: true, 
-    userId: auth.userId, 
-    data: out 
-  });
+  res.json({ ok: true, userId, data: out });
 });
 
-/** ===== Progress: Mark Perfect (CHIA SẺ CHO CÙNG USER ID) ===== */
+/** ===== Progress: Mark Perfect ===== */
 app.post("/api/progress/mark-perfect", (req, res) => {
   const { deviceId, license, testId, attemptId } = req.body || {};
   if (!deviceId || !license || !testId) {
     return res.status(400).send("Missing deviceId/license/testId");
   }
 
+  // Verify license
+  const p = parseLicense(license);
+  if (!p) return res.status(400).send("Bad license format");
+
+  const today = yyyymmddToday();
+  if (p.expiry < today) return res.status(403).send("Expired");
+
+  const expected = computeLicenseHash(deviceId, p.expiry);
+  if (expected !== p.hash) return res.status(403).send("Invalid");
+
   const db = loadDB();
-  const auth = verifyAndGetUserId(db, deviceId, license);
-  
-  if (!auth.ok) {
-    return res.status(auth.code).send(auth.msg);
-  }
+  const rec = db[license];
+  if (!rec) return res.status(403).send("License not found");
+  if (rec.deviceId !== deviceId) return res.status(403).send("License bound to another device");
+
+  const userId = rec.userId || "";
+  if (!userId) return res.status(500).send("License missing userId");
+
+  // Check revoked
+  if (isDeviceRevoked(db, deviceId)) return res.status(403).send("Device revoked");
+  if (isUserRevoked(db, userId)) return res.status(403).send("User revoked");
 
   const tid = String(testId).trim();
   if (!tid) return res.status(400).send("Bad testId");
 
-  // Cập nhật last seen
-  attachDeviceToUser(db, auth.userId, deviceId);
+  // Update tracking
+  attachDeviceToUser(db, userId, deviceId);
 
-  // Lấy progress từ userId (CHIA SẺ CHO TẤT CẢ DEVICE CÙNG USER)
-  db.__progress[auth.userId] = db.__progress[auth.userId] || {};
-  const bucket = db.__progress[auth.userId];
+  // Update progress
+  db.__progress[userId] = db.__progress[userId] || {};
+  const bucket = db.__progress[userId];
 
-  const rec = (bucket[tid] = bucket[tid] || {
+  const progressRec = (bucket[tid] = bucket[tid] || {
     perfectCount: 0,
     updatedAt: "",
     recentAttempts: [],
   });
 
   const aId = String(attemptId || "").trim();
-  rec.recentAttempts = Array.isArray(rec.recentAttempts) ? rec.recentAttempts : [];
+  progressRec.recentAttempts = Array.isArray(progressRec.recentAttempts) ? progressRec.recentAttempts : [];
   
-  // Kiểm tra attempt trùng lặp
   if (aId) {
-    if (rec.recentAttempts.includes(aId)) {
-      const perfectCount = clampInt(rec.perfectCount || 0, 0, 3);
+    if (progressRec.recentAttempts.includes(aId)) {
+      const perfectCount = clampInt(progressRec.perfectCount || 0, 0, 3);
       saveDB(db);
       return res.json({
         ok: true,
@@ -496,59 +532,20 @@ app.post("/api/progress/mark-perfect", (req, res) => {
         completed: perfectCount >= 3,
       });
     }
-    rec.recentAttempts.push(aId);
-    if (rec.recentAttempts.length > 20) rec.recentAttempts.shift();
+    progressRec.recentAttempts.push(aId);
+    if (progressRec.recentAttempts.length > 20) progressRec.recentAttempts.shift();
   }
 
-  // Tăng perfectCount (tối đa 3)
-  rec.perfectCount = clampInt((rec.perfectCount || 0) + 1, 0, 3);
-  rec.updatedAt = new Date().toISOString();
-  
+  progressRec.perfectCount = clampInt((progressRec.perfectCount || 0) + 1, 0, 3);
+  progressRec.updatedAt = new Date().toISOString();
   saveDB(db);
 
-  const perfectCount = rec.perfectCount;
+  const perfectCount = progressRec.perfectCount;
   res.json({
     ok: true,
     perfectCount,
     percent: calcPercentFromPerfectCount(perfectCount),
     completed: perfectCount >= 3,
-  });
-});
-
-/** ===== Progress: Reset for test (Admin only) ===== */
-app.post("/api/admin/reset-progress", (req, res) => {
-  if (!ADMIN_KEY) return res.status(500).send("Missing ADMIN_KEY on server");
-  const key = req.header("x-admin-key");
-  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
-
-  const { userId, testId } = req.body || {};
-  const uid = normalizeUserId(userId);
-  if (!uid) return res.status(400).send("Missing/Bad userId");
-
-  const db = loadDB();
-  
-  if (!db.__progress[uid]) {
-    return res.json({ ok: true, message: "No progress found" });
-  }
-
-  if (testId) {
-    // Reset 1 test cụ thể
-    const tid = String(testId).trim();
-    if (db.__progress[uid][tid]) {
-      delete db.__progress[uid][tid];
-    }
-  } else {
-    // Reset all tests cho user
-    db.__progress[uid] = {};
-  }
-  
-  saveDB(db);
-  
-  res.json({ 
-    ok: true, 
-    userId: uid,
-    testId: testId || "all",
-    reset: true 
   });
 });
 
