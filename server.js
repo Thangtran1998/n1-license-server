@@ -2,7 +2,21 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import express from "express";
-import { fileURLToPath } from "url";
+
+/**
+ * LICENSE SERVER (Option A - file DB like server.txt)
+ *
+ * ✅ DB saved to a relative file by default (process.cwd()) to match server.txt behavior.
+ * ✅ You can point DB_FILE to a Render Persistent Disk mount path for true persistence.
+ * ✅ Atomic writes to avoid JSON corruption on sudden restarts.
+ *
+ * ENV:
+ *   PORT
+ *   LICENSE_SECRET   (required in production)
+ *   ADMIN_KEY        (required in production)
+ *   ALLOW_ORIGIN     (default "*")
+ *   DB_FILE          (default "./license-db.json")
+ */
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -15,61 +29,74 @@ const LICENSE_SECRET = process.env.LICENSE_SECRET || "CHANGE_ME_SECRET";
 const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME_ADMIN_KEY";
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-// __dirname for ESM
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// DB file
-const DB_PATH = path.join(__dirname, "license-db.json");
+// Like server.txt: relative path (based on process.cwd()) by default
+const DB_FILE = process.env.DB_FILE || "./license-db.json";
+const DB_PATH = path.resolve(process.cwd(), DB_FILE);
 
 // =====================
 // CORS
 // =====================
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.header("Vary", "Origin");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
 // =====================
-// DB helpers
+// DB helpers (atomic write + schema normalize)
 // =====================
+function ensureDirForFile(filePath) {
+  const dir = path.dirname(filePath);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+}
+
+function normalizeDB(db) {
+  const out = db && typeof db === "object" ? db : {};
+  out.__revokedDevices = out.__revokedDevices && typeof out.__revokedDevices === "object" ? out.__revokedDevices : {};
+  out.__revokedUsers = out.__revokedUsers && typeof out.__revokedUsers === "object" ? out.__revokedUsers : {};
+  out.__users = out.__users && typeof out.__users === "object" ? out.__users : {};
+  out.__userDevices = out.__userDevices && typeof out.__userDevices === "object" ? out.__userDevices : {};
+  out.__progress = out.__progress && typeof out.__progress === "object" ? out.__progress : {};
+  return out;
+}
+
+function emptyDB() {
+  return normalizeDB({});
+}
+
 function loadDB() {
+  if (!fs.existsSync(DB_PATH)) return emptyDB();
   try {
     const raw = fs.readFileSync(DB_PATH, "utf-8");
-    const db = JSON.parse(raw);
-    
-    // Log số lượng licenses
-    const licenses = Object.keys(db).filter(k => !k.startsWith('__'));
-    console.log(`Loaded DB with ${licenses.length} licenses`);
-    
-    db.__revokedDevices = db.__revokedDevices || {};
-    db.__revokedUsers = db.__revokedUsers || {};
-    db.__users = db.__users || {};
-    db.__userDevices = db.__userDevices || {};
-    db.__progress = db.__progress || {};
-    
-    return db;
-  } catch (error) {
-    console.log("Creating new DB, no existing file found");
-    return {
-      __revokedDevices: {},
-      __revokedUsers: {},
-      __users: {},
-      __userDevices: {},
-      __progress: {},
-    };
+    return normalizeDB(JSON.parse(raw));
+  } catch (e) {
+    // Don't silently lose data
+    console.error("[DB] load failed:", e?.message || e);
+    // Backup corrupted DB for investigation
+    try {
+      const bak = DB_PATH + ".corrupt-" + new Date().toISOString().replace(/[:.]/g, "-");
+      fs.copyFileSync(DB_PATH, bak);
+      console.error("[DB] corrupted DB backed up to:", bak);
+    } catch {}
+    return emptyDB();
   }
 }
 
 function saveDB(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf-8");
+  const data = JSON.stringify(normalizeDB(db), null, 2);
+  ensureDirForFile(DB_PATH);
+  const tmp = DB_PATH + ".tmp";
+  fs.writeFileSync(tmp, data, "utf-8");
+  fs.renameSync(tmp, DB_PATH);
 }
 
 // =====================
-// License helpers
+// License helpers (keep old format: N1.<yyyymmdd>.<24hex>)
 // =====================
 function yyyymmddToday() {
   const d = new Date();
@@ -88,7 +115,6 @@ function computeLicenseHash(deviceId, expiry) {
 }
 
 function parseLicense(license) {
-  // Format: N1.<expiry>.<hash>
   if (!license || typeof license !== "string") return null;
   const parts = license.split(".");
   if (parts.length !== 3) return null;
@@ -124,6 +150,7 @@ function ensureUserRecord(db, userId, userName, examDate) {
   };
   if (userName) db.__users[userId].userName = String(userName).trim();
   if (examDate) db.__users[userId].examDate = String(examDate).trim();
+
   db.__userDevices[userId] = db.__userDevices[userId] || { devices: {}, lastSeenAt: "" };
 }
 
@@ -154,8 +181,8 @@ function authFromDeviceLicense(db, deviceId, license) {
   const expected = computeLicenseHash(deviceId, p.expiry);
   if (expected !== p.hash) return { ok: false, code: 403, msg: "Invalid" };
 
-  if (!db[license]) return { ok: false, code: 403, msg: "License not found" };
   const rec = db[license];
+  if (!rec) return { ok: false, code: 403, msg: "License not found" };
   if (rec.deviceId !== deviceId) return { ok: false, code: 403, msg: "License bound to another device" };
 
   const userId = rec.userId || "";
@@ -187,6 +214,27 @@ function calcPercentFromPerfectCount(c) {
 // ROUTES
 // =====================
 app.get("/", (req, res) => res.send("OK"));
+
+app.get("/api/ping", (req, res) => {
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    dbFile: DB_FILE,
+    dbPath: DB_PATH,
+    cwd: process.cwd(),
+  });
+});
+
+// Admin DB health: confirm persistence after restart
+app.get("/api/admin/db-health", adminOnly, (req, res) => {
+  let exists = false;
+  let size = 0;
+  try {
+    exists = fs.existsSync(DB_PATH);
+    size = exists ? fs.statSync(DB_PATH).size : 0;
+  } catch {}
+  res.json({ ok: true, dbFile: DB_FILE, dbPath: DB_PATH, cwd: process.cwd(), exists, size });
+});
 
 // ADMIN: generate license
 app.post("/api/admin/generate", adminOnly, (req, res) => {
@@ -284,7 +332,7 @@ app.post("/api/admin/unrevoke-device", adminOnly, (req, res) => {
   res.json({ ok: true, deviceId, revoked: false });
 });
 
-// ADMIN: revoke/unrevoke user (locks ALL devices)
+// ADMIN: revoke/unrevoke user
 app.post("/api/admin/revoke-user", adminOnly, (req, res) => {
   const { userId, reason } = req.body || {};
   const uid = normalizeUserId(userId);
@@ -394,266 +442,10 @@ app.post("/api/progress/mark-perfect", (req, res) => {
   const perfectCount = rec.perfectCount;
   res.json({ ok: true, perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3 });
 });
-// =====================
-// DEBUG APIs - Kiểm tra DB
-// =====================
 
-// API 1: Xem tổng quan DB (admin only)
-app.get("/api/admin/debug-db", adminOnly, (req, res) => {
-  try {
-    const db = loadDB();
-    
-    // Đếm số lượng licenses (các key không bắt đầu bằng __)
-    const licenses = Object.keys(db).filter(k => !k.startsWith('__'));
-    
-    // Đếm số lượng users
-    const users = Object.keys(db.__users || {});
-    
-    // Đếm số lượng devices đã revoke
-    const revokedDevices = Object.keys(db.__revokedDevices || {});
-    
-    // Đếm số lượng users đã revoke
-    const revokedUsers = Object.keys(db.__revokedUsers || {});
-    
-    // Lấy 5 license gần nhất (nếu có)
-    const recentLicenses = licenses.slice(-5).map(licenseKey => {
-      return {
-        license: licenseKey,
-        ...db[licenseKey]
-      };
-    });
-    
-    res.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      dbPath: DB_PATH,
-      stats: {
-        totalLicenses: licenses.length,
-        totalUsers: users.length,
-        revokedDevices: revokedDevices.length,
-        revokedUsers: revokedUsers.length
-      },
-      recentLicenses: recentLicenses,
-      sampleUsers: users.slice(0, 5)
-    });
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-      stack: error.stack
-    });
-  }
-});
-
-// API 2: Xem chi tiết một license cụ thể (admin only)
-app.post("/api/admin/debug-license", adminOnly, (req, res) => {
-  try {
-    const { license } = req.body || {};
-    if (!license) {
-      return res.status(400).json({ ok: false, error: "Missing license" });
-    }
-    
-    const db = loadDB();
-    const licenseData = db[license];
-    
-    if (!licenseData) {
-      return res.status(404).json({ 
-        ok: false, 
-        error: "License not found",
-        note: "License keys are stored directly in DB root"
-      });
-    }
-    
-    // Kiểm tra xem user có bị revoke không
-    const userId = licenseData.userId;
-    const userRevoked = userId ? !!(db.__revokedUsers && db.__revokedUsers[userId]) : false;
-    
-    // Kiểm tra xem device có bị revoke không
-    const deviceId = licenseData.deviceId;
-    const deviceRevoked = deviceId ? !!(db.__revokedDevices && db.__revokedDevices[deviceId]) : false;
-    
-    res.json({
-      ok: true,
-      license: license,
-      data: licenseData,
-      status: {
-        userRevoked,
-        deviceRevoked,
-        isValid: !userRevoked && !deviceRevoked
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-// API 3: Xem chi tiết user (admin only)
-app.post("/api/admin/debug-user", adminOnly, (req, res) => {
-  try {
-    const { userId } = req.body || {};
-    if (!userId) {
-      return res.status(400).json({ ok: false, error: "Missing userId" });
-    }
-    
-    const db = loadDB();
-    
-    // Thông tin user
-    const userInfo = db.__users && db.__users[userId];
-    
-    // Các licenses của user
-    const userLicenses = [];
-    for (const [key, value] of Object.entries(db)) {
-      if (!key.startsWith('__') && value.userId === userId) {
-        userLicenses.push({
-          license: key,
-          deviceId: value.deviceId,
-          expiry: value.expiry,
-          createdAt: value.createdAt
-        });
-      }
-    }
-    
-    // Devices của user
-    const userDevices = db.__userDevices && db.__userDevices[userId];
-    
-    // Kiểm tra revoke status
-    const isRevoked = !!(db.__revokedUsers && db.__revokedUsers[userId]);
-    
-    res.json({
-      ok: true,
-      userId: userId,
-      userInfo: userInfo || { error: "User not found in __users" },
-      isRevoked,
-      licenses: userLicenses,
-      devices: userDevices || { error: "No device info" },
-      revokedInfo: isRevoked ? db.__revokedUsers[userId] : null
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-// API 4: Kiểm tra file DB trực tiếp (admin only)
-app.get("/api/admin/check-db-file", adminOnly, (req, res) => {
-  try {
-    // Kiểm tra file có tồn tại không
-    const fileExists = fs.existsSync(DB_PATH);
-    
-    let fileStats = null;
-    let fileContent = null;
-    let fileSize = 0;
-    
-    if (fileExists) {
-      fileStats = fs.statSync(DB_PATH);
-      fileSize = fileStats.size;
-      
-      // Đọc 1KB đầu tiên để kiểm tra (tránh đọc file quá lớn)
-      const fd = fs.openSync(DB_PATH, 'r');
-      const buffer = Buffer.alloc(1024);
-      fs.readSync(fd, buffer, 0, 1024, 0);
-      fs.closeSync(fd);
-      
-      fileContent = buffer.toString('utf-8').substring(0, 200) + '...';
-    }
-    
-    res.json({
-      ok: true,
-      dbPath: DB_PATH,
-      fileExists,
-      fileSize,
-      fileStats: fileStats ? {
-        created: fileStats.birthtime,
-        modified: fileStats.mtime,
-        size: fileStats.size
-      } : null,
-      filePreview: fileContent,
-      directory: __dirname,
-      directoryWritable: canWrite(__dirname)
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-// Helper function để kiểm tra quyền ghi
-function canWrite(dir) {
-  try {
-    fs.accessSync(dir, fs.constants.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// API 5: Fix DB nếu cần (admin only)
-app.post("/api/admin/fix-db", adminOnly, (req, res) => {
-  try {
-    const db = loadDB();
-    
-    // Fix cấu trúc __users nếu bị lỗi
-    if (!db.__users || typeof db.__users !== 'object') {
-      db.__users = {};
-    }
-    
-    // Đảm bảo tất cả licenses đều có userId hợp lệ
-    let fixedCount = 0;
-    for (const [key, value] of Object.entries(db)) {
-      if (key.startsWith('__')) continue;
-      
-      // Nếu license không có userId, tạo userId từ deviceId
-      if (!value.userId) {
-        value.userId = `auto_${value.deviceId || key.substring(0, 8)}`;
-        fixedCount++;
-      }
-      
-      // Đảm bảo user tồn tại trong __users
-      if (value.userId && !db.__users[value.userId]) {
-        db.__users[value.userId] = {
-          userName: value.userName || 'Unknown',
-          examDate: value.examDate || '',
-          createdAt: value.createdAt || new Date().toISOString(),
-          autoFixed: true
-        };
-        fixedCount++;
-      }
-    }
-    
-    saveDB(db);
-    
-    res.json({
-      ok: true,
-      message: `DB fixed. Updated ${fixedCount} records.`,
-      fixedCount
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
 app.listen(PORT, () => {
-  console.log("=".repeat(50));
-  console.log(`Server running on port ${PORT}`);
-  console.log(`DB Path: ${DB_PATH}`);
-  console.log(`Admin Key: ${ADMIN_KEY === "CHANGE_ME_ADMIN_KEY" ? "⚠️ DEFAULT - CHANGE IT!" : "✅ Configured"}`);
-  console.log(`License Secret: ${LICENSE_SECRET === "CHANGE_ME_SECRET" ? "⚠️ DEFAULT - CHANGE IT!" : "✅ Configured"}`);
-  console.log(`CORS Allow Origin: ${ALLOW_ORIGIN}`);
-  
-  // Kiểm tra DB file
-  try {
-    const dbExists = fs.existsSync(DB_PATH);
-    if (dbExists) {
-      const stats = fs.statSync(DB_PATH);
-      console.log(`DB File: ✅ Found (${stats.size} bytes)`);
-      
-      // Đọc thử để kiểm tra
-      const db = loadDB();
-      const licenseCount = Object.keys(db).filter(k => !k.startsWith('__')).length;
-      console.log(`Licenses in DB: ${licenseCount}`);
-    } else {
-      console.log(`DB File: ❌ Not found - will be created on first write`);
-    }
-  } catch (e) {
-    console.log(`DB File: ❌ Error checking - ${e.message}`);
-  }
-  
-  console.log("=".repeat(50));
+  console.log("Server running on port", PORT);
+  console.log("[DB] DB_FILE =", DB_FILE);
+  console.log("[DB] DB_PATH =", DB_PATH);
+  console.log("[DB] CWD     =", process.cwd());
 });
