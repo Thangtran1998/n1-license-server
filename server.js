@@ -74,7 +74,7 @@ function sha256Hex(s) {
 }
 
 function computeLicenseHash(deviceId, expiry) {
-  return sha256Hex(`${deviceId}|${expiry}|${SECRET}`);
+return sha256Hex(`${deviceId}|${expiry}|${SECRET}`).slice(0, 24); // Chỉ lấy 24 ký tự đầu
 }
 
 function parseLicense(license) {
