@@ -15,39 +15,36 @@ const LICENSE_SECRET = process.env.LICENSE_SECRET || "CHANGE_ME_SECRET";
 const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME_ADMIN_KEY";
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 
-// =====================
-// FIX: Sử dụng relative path GIỐNG server.txt
-// =====================
-// Không dùng __dirname, dùng relative path "./"
-const DB_FILE = "./license-db.json";  // Giống hệt server.txt
+// __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Helper để log đường dẫn (debug)
-console.log("Working directory:", process.cwd());
-console.log("DB file path:", path.resolve(DB_FILE));
+// DB file
+const DB_PATH = path.join(__dirname, "license-db.json");
+
+// =====================
+// CORS
+// =====================
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-admin-key");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 // =====================
 // DB helpers
 // =====================
 function loadDB() {
   try {
-    if (!fs.existsSync(DB_FILE)) {
-      // Tạo DB mới nếu chưa có
-      const newDB = {
-        __revokedDevices: {},
-        __revokedUsers: {},
-        __users: {},
-        __userDevices: {},
-        __progress: {},
-      };
-      // Ghi ngay để tạo file
-      fs.writeFileSync(DB_FILE, JSON.stringify(newDB, null, 2), "utf-8");
-      return newDB;
-    }
-    
-    const raw = fs.readFileSync(DB_FILE, "utf-8");
+    const raw = fs.readFileSync(DB_PATH, "utf-8");
     const db = JSON.parse(raw);
     
-    // Ensure all required sections exist
+    // Log số lượng licenses
+    const licenses = Object.keys(db).filter(k => !k.startsWith('__'));
+    console.log(`Loaded DB with ${licenses.length} licenses`);
+    
     db.__revokedDevices = db.__revokedDevices || {};
     db.__revokedUsers = db.__revokedUsers || {};
     db.__users = db.__users || {};
@@ -55,9 +52,8 @@ function loadDB() {
     db.__progress = db.__progress || {};
     
     return db;
-  } catch (err) {
-    console.error("Error loading DB:", err);
-    // Return empty DB on error
+  } catch (error) {
+    console.log("Creating new DB, no existing file found");
     return {
       __revokedDevices: {},
       __revokedUsers: {},
@@ -69,54 +65,8 @@ function loadDB() {
 }
 
 function saveDB(db) {
-  try {
-    // Atomic write: ghi vào file tạm rồi rename
-    const tempFile = DB_FILE + ".tmp";
-    fs.writeFileSync(tempFile, JSON.stringify(db, null, 2), "utf-8");
-    fs.renameSync(tempFile, DB_FILE);
-    return true;
-  } catch (err) {
-    console.error("Error saving DB:", err);
-    return false;
-  }
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf-8");
 }
-
-// =====================
-// Thêm API để kiểm tra trạng thái DB
-// =====================
-app.get("/api/admin/db-status", (req, res) => {
-  try {
-    const exists = fs.existsSync(DB_FILE);
-    const stats = exists ? fs.statSync(DB_FILE) : null;
-    
-    res.json({
-      ok: true,
-      workingDir: process.cwd(),
-      dbFile: path.resolve(DB_FILE),
-      exists,
-      size: stats?.size || 0,
-      modified: stats?.mtime || null
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// =====================
-// Thêm API backup/restore đơn giản
-// =====================
-app.post("/api/admin/backup-manual", adminOnly, (req, res) => {
-  try {
-    const db = loadDB();
-    const backupFile = `./backup-${new Date().toISOString().replace(/:/g, '-')}.json`;
-    fs.writeFileSync(backupFile, JSON.stringify(db, null, 2), "utf-8");
-    res.json({ ok: true, backupFile });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ... (phần còn lại của code giữ nguyên, chỉ thay đổi cách loadDB/saveDB)
 
 // =====================
 // License helpers
@@ -138,6 +88,7 @@ function computeLicenseHash(deviceId, expiry) {
 }
 
 function parseLicense(license) {
+  // Format: N1.<expiry>.<hash>
   if (!license || typeof license !== "string") return null;
   const parts = license.split(".");
   if (parts.length !== 3) return null;
@@ -333,7 +284,7 @@ app.post("/api/admin/unrevoke-device", adminOnly, (req, res) => {
   res.json({ ok: true, deviceId, revoked: false });
 });
 
-// ADMIN: revoke/unrevoke user
+// ADMIN: revoke/unrevoke user (locks ALL devices)
 app.post("/api/admin/revoke-user", adminOnly, (req, res) => {
   const { userId, reason } = req.body || {};
   const uid = normalizeUserId(userId);
@@ -443,5 +394,266 @@ app.post("/api/progress/mark-perfect", (req, res) => {
   const perfectCount = rec.perfectCount;
   res.json({ ok: true, perfectCount, percent: calcPercentFromPerfectCount(perfectCount), completed: perfectCount >= 3 });
 });
+// =====================
+// DEBUG APIs - Kiểm tra DB
+// =====================
 
-app.listen(PORT, () => console.log("Server running on port", PORT));
+// API 1: Xem tổng quan DB (admin only)
+app.get("/api/admin/debug-db", adminOnly, (req, res) => {
+  try {
+    const db = loadDB();
+    
+    // Đếm số lượng licenses (các key không bắt đầu bằng __)
+    const licenses = Object.keys(db).filter(k => !k.startsWith('__'));
+    
+    // Đếm số lượng users
+    const users = Object.keys(db.__users || {});
+    
+    // Đếm số lượng devices đã revoke
+    const revokedDevices = Object.keys(db.__revokedDevices || {});
+    
+    // Đếm số lượng users đã revoke
+    const revokedUsers = Object.keys(db.__revokedUsers || {});
+    
+    // Lấy 5 license gần nhất (nếu có)
+    const recentLicenses = licenses.slice(-5).map(licenseKey => {
+      return {
+        license: licenseKey,
+        ...db[licenseKey]
+      };
+    });
+    
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      dbPath: DB_PATH,
+      stats: {
+        totalLicenses: licenses.length,
+        totalUsers: users.length,
+        revokedDevices: revokedDevices.length,
+        revokedUsers: revokedUsers.length
+      },
+      recentLicenses: recentLicenses,
+      sampleUsers: users.slice(0, 5)
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
+// API 2: Xem chi tiết một license cụ thể (admin only)
+app.post("/api/admin/debug-license", adminOnly, (req, res) => {
+  try {
+    const { license } = req.body || {};
+    if (!license) {
+      return res.status(400).json({ ok: false, error: "Missing license" });
+    }
+    
+    const db = loadDB();
+    const licenseData = db[license];
+    
+    if (!licenseData) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: "License not found",
+        note: "License keys are stored directly in DB root"
+      });
+    }
+    
+    // Kiểm tra xem user có bị revoke không
+    const userId = licenseData.userId;
+    const userRevoked = userId ? !!(db.__revokedUsers && db.__revokedUsers[userId]) : false;
+    
+    // Kiểm tra xem device có bị revoke không
+    const deviceId = licenseData.deviceId;
+    const deviceRevoked = deviceId ? !!(db.__revokedDevices && db.__revokedDevices[deviceId]) : false;
+    
+    res.json({
+      ok: true,
+      license: license,
+      data: licenseData,
+      status: {
+        userRevoked,
+        deviceRevoked,
+        isValid: !userRevoked && !deviceRevoked
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// API 3: Xem chi tiết user (admin only)
+app.post("/api/admin/debug-user", adminOnly, (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing userId" });
+    }
+    
+    const db = loadDB();
+    
+    // Thông tin user
+    const userInfo = db.__users && db.__users[userId];
+    
+    // Các licenses của user
+    const userLicenses = [];
+    for (const [key, value] of Object.entries(db)) {
+      if (!key.startsWith('__') && value.userId === userId) {
+        userLicenses.push({
+          license: key,
+          deviceId: value.deviceId,
+          expiry: value.expiry,
+          createdAt: value.createdAt
+        });
+      }
+    }
+    
+    // Devices của user
+    const userDevices = db.__userDevices && db.__userDevices[userId];
+    
+    // Kiểm tra revoke status
+    const isRevoked = !!(db.__revokedUsers && db.__revokedUsers[userId]);
+    
+    res.json({
+      ok: true,
+      userId: userId,
+      userInfo: userInfo || { error: "User not found in __users" },
+      isRevoked,
+      licenses: userLicenses,
+      devices: userDevices || { error: "No device info" },
+      revokedInfo: isRevoked ? db.__revokedUsers[userId] : null
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// API 4: Kiểm tra file DB trực tiếp (admin only)
+app.get("/api/admin/check-db-file", adminOnly, (req, res) => {
+  try {
+    // Kiểm tra file có tồn tại không
+    const fileExists = fs.existsSync(DB_PATH);
+    
+    let fileStats = null;
+    let fileContent = null;
+    let fileSize = 0;
+    
+    if (fileExists) {
+      fileStats = fs.statSync(DB_PATH);
+      fileSize = fileStats.size;
+      
+      // Đọc 1KB đầu tiên để kiểm tra (tránh đọc file quá lớn)
+      const fd = fs.openSync(DB_PATH, 'r');
+      const buffer = Buffer.alloc(1024);
+      fs.readSync(fd, buffer, 0, 1024, 0);
+      fs.closeSync(fd);
+      
+      fileContent = buffer.toString('utf-8').substring(0, 200) + '...';
+    }
+    
+    res.json({
+      ok: true,
+      dbPath: DB_PATH,
+      fileExists,
+      fileSize,
+      fileStats: fileStats ? {
+        created: fileStats.birthtime,
+        modified: fileStats.mtime,
+        size: fileStats.size
+      } : null,
+      filePreview: fileContent,
+      directory: __dirname,
+      directoryWritable: canWrite(__dirname)
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// Helper function để kiểm tra quyền ghi
+function canWrite(dir) {
+  try {
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// API 5: Fix DB nếu cần (admin only)
+app.post("/api/admin/fix-db", adminOnly, (req, res) => {
+  try {
+    const db = loadDB();
+    
+    // Fix cấu trúc __users nếu bị lỗi
+    if (!db.__users || typeof db.__users !== 'object') {
+      db.__users = {};
+    }
+    
+    // Đảm bảo tất cả licenses đều có userId hợp lệ
+    let fixedCount = 0;
+    for (const [key, value] of Object.entries(db)) {
+      if (key.startsWith('__')) continue;
+      
+      // Nếu license không có userId, tạo userId từ deviceId
+      if (!value.userId) {
+        value.userId = `auto_${value.deviceId || key.substring(0, 8)}`;
+        fixedCount++;
+      }
+      
+      // Đảm bảo user tồn tại trong __users
+      if (value.userId && !db.__users[value.userId]) {
+        db.__users[value.userId] = {
+          userName: value.userName || 'Unknown',
+          examDate: value.examDate || '',
+          createdAt: value.createdAt || new Date().toISOString(),
+          autoFixed: true
+        };
+        fixedCount++;
+      }
+    }
+    
+    saveDB(db);
+    
+    res.json({
+      ok: true,
+      message: `DB fixed. Updated ${fixedCount} records.`,
+      fixedCount
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+app.listen(PORT, () => {
+  console.log("=".repeat(50));
+  console.log(`Server running on port ${PORT}`);
+  console.log(`DB Path: ${DB_PATH}`);
+  console.log(`Admin Key: ${ADMIN_KEY === "CHANGE_ME_ADMIN_KEY" ? "⚠️ DEFAULT - CHANGE IT!" : "✅ Configured"}`);
+  console.log(`License Secret: ${LICENSE_SECRET === "CHANGE_ME_SECRET" ? "⚠️ DEFAULT - CHANGE IT!" : "✅ Configured"}`);
+  console.log(`CORS Allow Origin: ${ALLOW_ORIGIN}`);
+  
+  // Kiểm tra DB file
+  try {
+    const dbExists = fs.existsSync(DB_PATH);
+    if (dbExists) {
+      const stats = fs.statSync(DB_PATH);
+      console.log(`DB File: ✅ Found (${stats.size} bytes)`);
+      
+      // Đọc thử để kiểm tra
+      const db = loadDB();
+      const licenseCount = Object.keys(db).filter(k => !k.startsWith('__')).length;
+      console.log(`Licenses in DB: ${licenseCount}`);
+    } else {
+      console.log(`DB File: ❌ Not found - will be created on first write`);
+    }
+  } catch (e) {
+    console.log(`DB File: ❌ Error checking - ${e.message}`);
+  }
+  
+  console.log("=".repeat(50));
+});
