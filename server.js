@@ -1,15 +1,22 @@
-// server.js - N1 License Server for JLPT N1 CyberSphere
-// ESM, Express, PostgreSQL, Render-ready
-
+// server.js - N1 License Server for Neon.tech
 import express from 'express';
 import pg from 'pg';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import ws from 'ws';
+import { neonConfig } from '@neondatabase/serverless';
 
 dotenv.config();
 
 // =========================================================
-// ENV VALIDATION - Bắt buộc khi start
+// NEON CONFIG - QUAN TRỌNG: Cấu hình WebSocket
+// =========================================================
+neonConfig.webSocketConstructor = ws;
+// Nếu chạy trên Render, có thể cần thêm dòng này:
+neonConfig.useSecureWebSocket = true;  // Dùng WSS thay vì WS
+
+// =========================================================
+// ENV VALIDATION
 // =========================================================
 const requiredEnv = ['LICENSE_SECRET', 'ADMIN_KEY', 'DATABASE_URL'];
 for (const env of requiredEnv) {
@@ -28,38 +35,54 @@ const LICENSE_SECRET = process.env.LICENSE_SECRET;
 const ADMIN_KEY = process.env.ADMIN_KEY;
 const ALLOW_FALLBACK_BIND = process.env.ALLOW_FALLBACK_BIND === 'true';
 
-console.log(`🚀 Starting N1 License Server`);
+console.log(`🚀 Starting N1 License Server (Neon.tech)`);
 console.log(`📡 Port: ${PORT}`);
 console.log(`🔗 CORS Allow-Origin: ${ALLOW_ORIGIN}`);
-console.log(`🔒 Strict mode: ${ALLOW_FALLBACK_BIND ? 'Fallback enabled' : 'Strict mode (no auto-create)'}`);
-console.log(`📦 Database: PostgreSQL`);
+console.log(`🔒 Strict mode: ${ALLOW_FALLBACK_BIND ? 'Fallback enabled' : 'Strict mode'}`);
+console.log(`📦 Database: Neon.tech PostgreSQL (WebSocket enabled)`);
 
 // =========================================================
-// PostgreSQL Pool
+// PostgreSQL Pool - CẤU HÌNH CHO NEON
 // =========================================================
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  ssl: {
+    rejectUnauthorized: false,  // Neon yêu cầu SSL
+  },
+  max: 5,  // Giới hạn connections cho free tier (Neon free cho phép 5 concurrent)
+  idleTimeoutMillis: 10000,  // Đóng connection không dùng sau 10s
+  connectionTimeoutMillis: 5000,  // Timeout sau 5s nếu không kết nối được
+  allowExitOnIdle: true,  // Cho phép pool đóng khi không dùng
 });
 
+// Handle pool errors
 pool.on('error', (err) => {
   console.error('❌ Unexpected DB pool error:', err);
+  // Không exit vì pool có thể reconnect
 });
 
-// Test DB connection on startup
-(async () => {
-  try {
-    const client = await pool.connect();
-    console.log('✅ Database connected successfully');
-    client.release();
-  } catch (err) {
-    console.error('❌ Database connection failed:', err);
-    process.exit(1);
+// Test connection with retry
+async function testConnection(retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const client = await pool.connect();
+      console.log('✅ Database connected successfully to Neon.tech');
+      client.release();
+      return true;
+    } catch (err) {
+      console.error(`❌ Connection attempt ${i + 1}/${retries} failed:`, err.message);
+      if (i === retries - 1) {
+        console.error('❌ Cannot connect to database after all retries');
+        process.exit(1);
+      }
+      // Đợi 2s rồi thử lại
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
   }
-})();
+}
+
+// Chạy test connection
+await testConnection();
 
 // =========================================================
 // HELPER FUNCTIONS
@@ -77,18 +100,15 @@ function generateLicenseV1(deviceId, expiry, secret) {
 }
 
 /**
- * Validate V1 license format and hash
- * Returns { valid: boolean, expiry: string | null, hash: string | null }
+ * Validate V1 license
  */
 function parseAndValidateV1(license, deviceId, secret) {
   const parts = license.split('-');
   if (parts.length !== 2) return { valid: false };
   const [expiry, hash] = parts;
   
-  // Check expiry format YYYYMMDD
   if (!/^\d{8}$/.test(expiry)) return { valid: false };
   
-  // Validate hash
   const expectedHash = crypto
     .createHash('sha256')
     .update(`${deviceId}|${expiry}|${secret}`)
@@ -161,11 +181,16 @@ app.use(corsMiddleware);
  * GET /api/ping - Health check
  */
 app.get('/api/ping', (req, res) => {
-  res.json({ ok: true, timestamp: new Date().toISOString(), mode: ALLOW_FALLBACK_BIND ? 'fallback' : 'strict' });
+  res.json({ 
+    ok: true, 
+    timestamp: new Date().toISOString(), 
+    mode: ALLOW_FALLBACK_BIND ? 'fallback' : 'strict',
+    database: 'neon.tech'
+  });
 });
 
 /**
- * POST /api/verify - Verify license and bind device if first time
+ * POST /api/verify - Verify license
  */
 app.post('/api/verify', async (req, res) => {
   const { deviceId, license } = req.body;
@@ -201,22 +226,12 @@ app.post('/api/verify', async (req, res) => {
     );
     
     if (licenseQuery.rows.length === 0) {
-      // License not found in DB
-      if (!ALLOW_FALLBACK_BIND) {
-        await client.query('ROLLBACK');
-        return res.status(404).send('License not found');
-      }
-      
-      // FALLBACK MODE: Auto-create license record (for backward compatibility)
-      console.warn(`⚠️ Fallback mode: auto-creating license record for ${license}`);
-      
-      // Create a temporary user? Can't - so we reject in strict mode
       await client.query('ROLLBACK');
-      return res.status(404).send('License not found (strict mode)');
+      return res.status(404).send('License not found');
     }
     
     const licenseRecord = licenseQuery.rows[0];
-    const { user_id: userId, device_id: boundDeviceId, created_at: createdAt } = licenseRecord;
+    const { user_id: userId, device_id: boundDeviceId } = licenseRecord;
     
     // 4. Check if device is revoked
     const revokedDevice = await client.query(
@@ -733,6 +748,13 @@ app.post('/api/admin/reset-progress', adminAuth, async (req, res) => {
 // =========================================================
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📝 API endpoints:`);
+  console.log(`   - GET  /api/ping`);
+  console.log(`   - POST /api/verify`);
+  console.log(`   - POST /api/progress/get`);
+  console.log(`   - POST /api/progress/mark-perfect`);
+  console.log(`   - POST /api/request-reset`);
+  console.log(`   - POST /api/admin/* (protected)`);
 });
 
 // Graceful shutdown
