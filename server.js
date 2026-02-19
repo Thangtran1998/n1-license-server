@@ -746,8 +746,9 @@ app.post('/api/admin/reset-progress', adminAuth, async (req, res) => {
 // =========================================================
 // START SERVER
 // =========================================================
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
+  console.log(`   📡 Listening on all interfaces (0.0.0.0)`);
   console.log(`📝 API endpoints:`);
   console.log(`   - GET  /api/ping`);
   console.log(`   - POST /api/verify`);
