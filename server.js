@@ -519,6 +519,30 @@ app.post('/api/bookmarks', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+app.delete('/api/bookmarks/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ ok: false, error: 'Thiếu id' });
+    }
+
+    const result = await pool.query(
+      'DELETE FROM bookmarks WHERE id = $1',
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: 'Không tìm thấy bookmark' });
+    }
+
+    res.json({ ok: true, deleted: id });
+
+  } catch (err) {
+    console.error('[BOOKMARK DELETE] Lỗi:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // =========================================================
 // ADMIN ENDPOINTS (Protected by x-admin-key)
