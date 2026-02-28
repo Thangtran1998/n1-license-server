@@ -543,6 +543,26 @@ app.delete('/api/bookmarks/:id', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+app.get('/api/bookmarks', async (req, res) => {
+  try {
+    const { userId, testId } = req.query;
+
+    if (!userId || !testId) {
+      return res.status(400).json({ ok: false, error: 'Thiếu userId hoặc testId' });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM bookmarks WHERE user_id = $1 AND test_id = $2',
+      [userId, testId]
+    );
+
+    res.json({ ok: true, bookmarks: result.rows });
+
+  } catch (err) {
+    console.error('[BOOKMARK GET] Lỗi:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // =========================================================
 // ADMIN ENDPOINTS (Protected by x-admin-key)
