@@ -569,18 +569,33 @@ app.get("/api/bookmarks", async (req, res) => {
   try {
     const { userId, testId } = req.query;
 
-    if (!userId || !testId) {
+    // CHỈ cần userId, testId là optional
+    if (!userId) {
       return res
         .status(400)
-        .json({ ok: false, error: "Thiếu userId hoặc testId" });
+        .json({ ok: false, error: "Thiếu userId" });
     }
 
-    const result = await pool.query(
-      "SELECT * FROM bookmarks WHERE user_id = $1 AND test_id = $2",
-      [userId, testId],
-    );
+    let query, params;
+    
+    if (testId) {
+      // Nếu có testId, lọc theo testId
+      query = "SELECT * FROM bookmarks WHERE user_id = $1 AND test_id = $2 ORDER BY created_at DESC";
+      params = [userId, testId];
+    } else {
+      // Nếu KHÔNG có testId, lấy TẤT CẢ bookmark của user
+      query = "SELECT * FROM bookmarks WHERE user_id = $1 ORDER BY created_at DESC";
+      params = [userId];
+    }
 
-    res.json({ ok: true, bookmarks: result.rows });
+    const result = await pool.query(query, params);
+
+    res.json({ 
+      ok: true, 
+      bookmarks: result.rows,
+      total: result.rows.length,
+      filtered: testId ? `testId=${testId}` : 'all tests'
+    });
   } catch (err) {
     console.error("[BOOKMARK GET] Lỗi:", err.message);
     res.status(500).json({ ok: false, error: err.message });
