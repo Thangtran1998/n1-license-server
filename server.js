@@ -473,6 +473,52 @@ app.post('/api/request-reset', async (req, res) => {
   
   res.json({ ok: true, message: 'Reset request logged. Admin will contact you.' });
 });
+// ==================== BOOKMARK API ====================
+app.post('/api/bookmarks', async (req, res) => {
+  try {
+    const {
+      id,
+      questionKey,
+      questionText,
+      questionNumber,
+      testId,
+      userId,
+      timestamp,
+      note
+    } = req.body;
+
+    // Kiểm tra field bắt buộc
+    if (!id || !questionKey) {
+      return res.status(400).json({ ok: false, error: 'Thiếu id hoặc questionKey' });
+    }
+
+    await pool.query(
+      `INSERT INTO bookmarks 
+        (id, question_key, question_text, question_number, test_id, user_id, timestamp, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (id) DO UPDATE SET
+         note      = EXCLUDED.note,
+         user_id   = EXCLUDED.user_id,
+         timestamp = EXCLUDED.timestamp`,
+      [
+        id,
+        questionKey,
+        (questionText || '').slice(0, 500),
+        questionNumber || null,
+        testId || null,
+        userId || null,
+        timestamp || Date.now(),
+        note || ''
+      ]
+    );
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.error('[BOOKMARK] Lỗi:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // =========================================================
 // ADMIN ENDPOINTS (Protected by x-admin-key)

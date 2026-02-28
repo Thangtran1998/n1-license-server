@@ -1,0 +1,11 @@
+Hãy tưởng tượng schema.sql giống như một bản vẽ chi tiết của một ngôi nhà. Bạn chỉ cần dùng bản vẽ đó một lần duy nhất để xây dựng nên ngôi nhà. Sau khi ngôi nhà đã hoàn thành, bạn sống và làm việc trong đó chứ không cần dùng lại bản vẽ nữa. Tương tự, bạn chỉ cần chạy file schema.sql một lần để tạo ra các bảng biểu trong CSDL. Sau đó, ứng dụng của bạn sẽ tương tác trực tiếp với CSDL đã được tạo, và không cần đến file schema.sql nữa.
+
+Cụ thể trong dự án của bạn, quy trình đã diễn ra như sau:
+
+Giai đoạn Thiết kế & Chuẩn bị: Chúng ta đã có file schema.sql chứa các câu lệnh SQL để tạo ra 5 bảng cần thiết cho hệ thống: users, licenses, revoked_devices, revoked_users, và progress . File này là kết quả của việc phân tích yêu cầu và thiết kế cấu trúc dữ liệu.
+
+Giai đoạn Khởi tạo CSDL: Trong quá trình hướng dẫn bạn sử dụng Neon.tech, tôi đã đề cập đến việc dùng câu lệnh psql hoặc giao diện SQL Editor của Neon để chạy file schema.sql. Hành động chạy file này chính là lúc chúng ta dùng "bản vẽ" để xây dựng nên cấu trúc CSDL trên cloud .
+
+Giai đoạn Vận hành: Hiện tại, hệ thống của bạn (cụ thể là server Node.js) hoạt động bằng cách kết nối đến CSDL trên Neon.tech thông qua DATABASE_URL. Nó gửi các câu lệnh SELECT, INSERT, UPDATE, DELETE trực tiếp vào các bảng đã được tạo. Lúc này, schema.sql không còn được sử dụng nữa.
+
+Tóm lại, bạn đã dùng schema.sql trong quá khứ để khởi tạo CSDL. Bây giờ, dữ liệu thực tế của người dùng, license, tiến độ học tập... nằm trong CSDL trên Neon.tech. File schema.sql có thể được lưu lại như một tài liệu tham khảo hoặc để sử dụng khi cần tạo một CSDL mới (ví dụ: tạo môi trường test, clone dự án).
